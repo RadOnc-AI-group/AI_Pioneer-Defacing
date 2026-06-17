@@ -1,0 +1,14 @@
+name: totalseg-deface
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip
+  - dcm2niix
+  - pip:
+      - TotalSegmentator==2.14.0
+      - nibabel==5.4.2
+      - SimpleITK==2.5.5
+      - scipy==1.15.3
+      - pydicom==3.0.2
+      - highdicom==0.27.0

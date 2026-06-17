@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Conda
+.conda/
+
+# Output folders (patient data — never commit)
+out_*/
+results/
+
+# OS
+.DS_Store
+Thumbs.db
