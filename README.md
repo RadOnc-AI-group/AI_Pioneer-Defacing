@@ -2,9 +2,9 @@
 
 Removes facial features from CT images by replacing the face region with air (-1000 HU). Supports single patients and batch processing of entire cohorts.
 
-**Supported input formats:** NIfTI (`.nii`, `.nii.gz`), NRRD (`.nrrd`), DICOM (folder of `.dcm` files)  
+**Supported input formats:** NIfTI (`.nii`, `.nii.gz`), NRRD (`.nrrd`), DICOM (folder of DICOM files — a `.dcm` extension is not required)  
 **Supported operating systems:** Windows, Linux  
-**GPU required:** No — runs on CPU out of the box
+**GPU required:** No — runs on CPU out of the box, -d gpu possible
 
 ---
 
@@ -127,7 +127,7 @@ patients/
 │       └── ...
 ```
 
-When a patient folder contains multiple DICOM series, the tool reads the DICOM Modality tag and selects the CT series automatically. If multiple CT series are present, the one with the most files (typically the planning CT) is used.
+When a patient folder contains multiple DICOM series, the tool reads the DICOM Modality tag and selects the CT series automatically. If multiple CT series are present, the one with the most files (typically the planning CT) is used. DICOM files are detected by their content, so the `.dcm` file extension is optional — exports that use no extension or DICOM-UID-style filenames are handled as well.
 
 By default the tool looks for NIfTI/NRRD files matching `*CT*.nrrd`, `*CT*.nii.gz`, or `*CT*.nii`. If your files use a different naming convention, specify the pattern with `--ct-glob`:
 

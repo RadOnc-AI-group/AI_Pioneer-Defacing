@@ -92,6 +92,13 @@ def to_nifti(input_path: Path, tmp_dir: Path) -> Path:
         niis = sorted(tmp_dir.glob("input*.nii.gz"))
         if not niis:
             raise FileNotFoundError(f"dcm2niix produced no output for {input_path}")
+        if len(niis) > 1:
+            print(
+                f"WARNING: dcm2niix produced {len(niis)} NIfTI files for {input_path} "
+                f"({', '.join(n.name for n in niis)}); using '{niis[0].name}'. This can "
+                f"happen with gantry tilt or multiple series in one folder — verify the result.",
+                file=sys.stderr,
+            )
         return niis[0]
     raise ValueError(f"Unsupported input type: {input_path}")
 
@@ -116,9 +123,25 @@ def run_totalsegmentator(input_nii: Path, seg_dir: Path, device: str) -> Path:
 # Masking
 # ---------------------------------------------------------------------------
 
+def _same_grid(a: sitk.Image, b: sitk.Image) -> bool:
+    """True if two images occupy exactly the same voxel grid (size + physical space)."""
+    return (a.GetSize() == b.GetSize()
+            and a.GetSpacing() == b.GetSpacing()
+            and a.GetOrigin() == b.GetOrigin()
+            and a.GetDirection() == b.GetDirection())
+
+
 def _dilated_mask(mask_sitk: sitk.Image, dilate_vox: int, reference: sitk.Image = None) -> np.ndarray:
-    """Return a boolean numpy mask, optionally resampled to reference image grid."""
-    if reference is not None and reference.GetSize() != mask_sitk.GetSize():
+    """Return a boolean numpy mask, resampled onto the reference image grid if given.
+
+    The mask and the reference image can reach this function through different
+    converters (e.g. dcm2niix vs. SimpleITK's DICOM reader), which may produce
+    volumes of identical size but different orientation. Comparing the full grid
+    (not just size) and resampling in physical space whenever it differs avoids a
+    silent misalignment that would deface the wrong region. Resampling is a no-op
+    when the grids already match exactly.
+    """
+    if reference is not None and not _same_grid(reference, mask_sitk):
         resampler = sitk.ResampleImageFilter()
         resampler.SetReferenceImage(reference)
         resampler.SetInterpolator(sitk.sitkNearestNeighbor)
@@ -254,9 +277,14 @@ def deface_one(input_path: Path, out_dir: Path, device: str, dilate_vox: int) ->
 # ---------------------------------------------------------------------------
 
 def find_ct_in_folder(folder: Path, ct_globs: list[str]) -> Path | None:
-    """Return the first file matching any of the CT glob patterns."""
+    """Return the first file matching any of the CT glob patterns.
+
+    Files whose name starts with '.' are ignored — this skips macOS AppleDouble
+    sidecars (e.g. '._patient_CT.nrrd'), which otherwise match the glob and, being
+    alphabetically first, would be picked ahead of the real CT.
+    """
     for pattern in ct_globs:
-        matches = sorted(folder.glob(pattern))
+        matches = sorted(m for m in folder.glob(pattern) if not m.name.startswith("."))
         if matches:
             return matches[0]
     return None
@@ -265,30 +293,46 @@ def find_ct_in_folder(folder: Path, ct_globs: list[str]) -> Path | None:
 def find_dicom_ct_series(patient_dir: Path) -> Path | None:
     """
     Find the CT series directory for a patient folder. Handles three common layouts:
-      1. patient_dir/*.dcm          — DICOM files flat in the patient folder
-      2. patient_dir/<series>/*.dcm — one series subfolder
+      1. patient_dir/<dcm files>      — DICOM files flat in the patient folder
+      2. patient_dir/<series>/<dcm>   — one series subfolder
       3. patient_dir/<CT>/,
-         patient_dir/<MR>/...       — multiple series; picks CT by DICOM Modality tag,
-                                      and if still ambiguous, the series with the most files
-    Returns the directory containing the CT DICOM files, or None if not found.
+         patient_dir/<MR>/...         — multiple series; picks CT by DICOM Modality tag,
+                                        and if still ambiguous, the series with the most files
+    DICOM files are detected by content (via GDCM), so a '.dcm' file extension is
+    not required — many scanners export DICOM with no extension. Returns the
+    directory containing the CT DICOM files, or None if no DICOM series is found.
     """
     import pydicom
 
-    def modality(dcm_dir: Path) -> str:
-        first = next(dcm_dir.glob("*.dcm"), None)
-        if first is None:
+    reader = sitk.ImageSeriesReader()
+
+    def series_ids(folder: Path) -> list[str]:
+        try:
+            return list(reader.GetGDCMSeriesIDs(str(folder)))
+        except Exception:
+            return []
+
+    def num_dicom_files(folder: Path) -> int:
+        return sum(len(reader.GetGDCMSeriesFileNames(str(folder), sid)) for sid in series_ids(folder))
+
+    def modality(folder: Path) -> str:
+        ids = series_ids(folder)
+        if not ids:
+            return ""
+        files = reader.GetGDCMSeriesFileNames(str(folder), ids[0])
+        if not files:
             return ""
         try:
-            return pydicom.dcmread(str(first), stop_before_pixels=True).get("Modality", "")
+            return pydicom.dcmread(files[0], stop_before_pixels=True).get("Modality", "")
         except Exception:
             return ""
 
-    # Layout 1: dcm files directly in patient_dir
-    if list(patient_dir.glob("*.dcm")):
+    # Layout 1: DICOM files directly in patient_dir
+    if series_ids(patient_dir):
         return patient_dir
 
     # Layout 2 / 3: one level of series subfolders
-    series_dirs = [d for d in sorted(patient_dir.iterdir()) if d.is_dir() and list(d.glob("*.dcm"))]
+    series_dirs = [d for d in sorted(patient_dir.iterdir()) if d.is_dir() and series_ids(d)]
     if not series_dirs:
         return None
     if len(series_dirs) == 1:
@@ -297,7 +341,7 @@ def find_dicom_ct_series(patient_dir: Path) -> Path | None:
     # Multiple series — prefer CT modality, then largest series
     ct_series = [d for d in series_dirs if modality(d) == "CT"]
     candidates = ct_series if ct_series else series_dirs
-    return max(candidates, key=lambda d: len(list(d.glob("*.dcm"))))
+    return max(candidates, key=num_dicom_files)
 
 
 def discover_patients(patients_dir: Path, ct_globs: list[str]) -> list[tuple[Path, str]]:
