@@ -11,4 +11,4 @@ dependencies:
       - SimpleITK==2.5.5
       - scipy==1.15.3
       - pydicom==3.0.2
-      - highdicom==0.27.0
+      - python-gdcm==3.2.6
