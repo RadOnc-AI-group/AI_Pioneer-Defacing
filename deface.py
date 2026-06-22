@@ -26,6 +26,49 @@ FACE_VALUE_HU = -1000.0  # value written into de-faced voxels (air HU for CT)
 # Default glob patterns tried in order when discovering CT files in batch mode
 DEFAULT_CT_GLOBS = ["*CT*.nrrd", "*CT*.nii.gz", "*CT*.nii", "*ct*.nrrd", "*ct*.nii.gz"]
 
+# Recognized image file extensions, longest-first so ".nii.gz" wins over ".nii"
+KNOWN_SUFFIXES = (".nii.gz", ".nii", ".nrrd")
+
+
+# ---------------------------------------------------------------------------
+# Filename helpers
+# ---------------------------------------------------------------------------
+
+def classify_suffix(path: Path) -> str:
+    """
+    Return the recognized extension of path ('.nii.gz', '.nii', '.nrrd') or ''.
+
+    Unlike Path.suffixes, this only looks at the end of the filename, so
+    filenames with extra dots (DICOM-UID-style names, versioned filenames,
+    etc.) are still classified correctly.
+    """
+    name = path.name.lower()
+    for suffix in KNOWN_SUFFIXES:
+        if name.endswith(suffix):
+            return suffix
+    return ""
+
+
+def strip_known_suffix(path: Path) -> str:
+    """Return the filename with its recognized image extension removed."""
+    suffix = classify_suffix(path)
+    if suffix:
+        return path.name[: -len(suffix)]
+    return path.stem
+
+
+# ---------------------------------------------------------------------------
+# dtype helpers
+# ---------------------------------------------------------------------------
+
+def safe_cast(data: np.ndarray, dtype: np.dtype) -> np.ndarray:
+    """Round/clip data into dtype's representable range before casting, to avoid wraparound."""
+    dtype = np.dtype(dtype)
+    if np.issubdtype(dtype, np.integer):
+        info = np.iinfo(dtype)
+        data = np.clip(np.round(data), info.min, info.max)
+    return data.astype(dtype)
+
 
 # ---------------------------------------------------------------------------
 # Conversion helpers
@@ -33,7 +76,7 @@ DEFAULT_CT_GLOBS = ["*CT*.nrrd", "*CT*.nii.gz", "*CT*.nii", "*ct*.nrrd", "*ct*.n
 
 def to_nifti(input_path: Path, tmp_dir: Path) -> Path:
     """Return a NIfTI path for TotalSegmentator. Converts nrrd or dcm dir if needed."""
-    suffix = "".join(input_path.suffixes).lower()
+    suffix = classify_suffix(input_path)
     if suffix in (".nii.gz", ".nii"):
         return input_path
     if suffix == ".nrrd":
@@ -87,17 +130,33 @@ def _dilated_mask(mask_sitk: sitk.Image, dilate_vox: int, reference: sitk.Image 
     return mask
 
 
+def _mask_from_nifti(mask_img: nib.Nifti1Image, ref_img: nib.Nifti1Image) -> np.ndarray:
+    """Boolean mask array aligned to ref_img's voxel grid, resampling via the affines if needed."""
+    if mask_img.shape[:3] == ref_img.shape[:3]:
+        return mask_img.get_fdata() > 0
+    from scipy.ndimage import affine_transform
+    # Maps a ref-image voxel index to the corresponding mask-image voxel index.
+    transform = np.linalg.inv(mask_img.affine) @ ref_img.affine
+    resampled = affine_transform(
+        mask_img.get_fdata(), transform[:3, :3], offset=transform[:3, 3],
+        output_shape=ref_img.shape[:3], order=0, mode="constant", cval=0,
+    )
+    return resampled > 0.5
+
+
 def deface_nifti(image_path: Path, mask_path: Path, out_path: Path, dilate_vox: int) -> None:
     img = nib.load(str(image_path))
     mask_img = nib.load(str(mask_path))
-    data = img.get_fdata().astype(np.float32)
-    mask = mask_img.get_fdata() > 0
+    orig_dtype = img.get_data_dtype()
+    data = img.get_fdata().astype(np.float64)
+    mask = _mask_from_nifti(mask_img, img)
     if dilate_vox > 0:
         from scipy.ndimage import binary_dilation
         mask = binary_dilation(mask, iterations=dilate_vox)
     data[mask] = FACE_VALUE_HU
+    data = safe_cast(data, orig_dtype)
     out_img = nib.Nifti1Image(data, img.affine, img.header)
-    out_img.set_data_dtype(np.float32)
+    out_img.set_data_dtype(orig_dtype)
     nib.save(out_img, str(out_path))
 
 
@@ -105,8 +164,10 @@ def deface_nrrd(image_path: Path, mask_path: Path, out_path: Path, dilate_vox: i
     img = sitk.ReadImage(str(image_path))
     mask_sitk = sitk.ReadImage(str(mask_path))
     mask = _dilated_mask(mask_sitk, dilate_vox, reference=img)
-    data = sitk.GetArrayFromImage(img).astype(np.float32)
+    orig_dtype = sitk.GetArrayViewFromImage(img).dtype
+    data = sitk.GetArrayFromImage(img).astype(np.float64)
     data[mask] = FACE_VALUE_HU
+    data = safe_cast(data, orig_dtype)
     out_img = sitk.GetImageFromArray(data)
     out_img.CopyInformation(img)
     sitk.WriteImage(out_img, str(out_path))
@@ -114,6 +175,8 @@ def deface_nrrd(image_path: Path, mask_path: Path, out_path: Path, dilate_vox: i
 
 def deface_dicom_dir(dicom_dir: Path, mask_path: Path, out_dir: Path, dilate_vox: int) -> None:
     import pydicom
+    from pydicom.uid import generate_uid
+
     mask_sitk = sitk.ReadImage(str(mask_path))
     reader = sitk.ImageSeriesReader()
     series_ids = reader.GetGDCMSeriesIDs(str(dicom_dir))
@@ -126,14 +189,31 @@ def deface_dicom_dir(dicom_dir: Path, mask_path: Path, out_dir: Path, dilate_vox
     image = reader.Execute()
     mask = _dilated_mask(mask_sitk, dilate_vox, reference=image)
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    # New SeriesInstanceUID for the whole de-faced series (pixel data differs from the
+    # original, so it must not share UIDs with it — avoids PACS collisions/overwrites
+    # at the receiving center). StudyInstanceUID is left unchanged: same study/exam.
+    new_series_uid = generate_uid()
     for i, fname in enumerate(file_names):
         ds = pydicom.dcmread(fname)
+
+        if ds.file_meta.TransferSyntaxUID.is_compressed:
+            # Decompresses PixelData in place, switches TransferSyntaxUID to an
+            # uncompressed one, and generates a new SOPInstanceUID. Without this,
+            # writing decoded pixel bytes back under the original compressed
+            # TransferSyntaxUID produces a DICOM file with corrupt/undecodable pixel data.
+            ds.decompress()
+        else:
+            ds.SOPInstanceUID = generate_uid()
+        ds.file_meta.MediaStorageSOPInstanceUID = ds.SOPInstanceUID
+        ds.SeriesInstanceUID = new_series_uid
+
         slope = float(getattr(ds, "RescaleSlope", 1))
         intercept = float(getattr(ds, "RescaleIntercept", 0))
-        pixels = ds.pixel_array.astype(np.float32)
-        hu = pixels * slope + intercept
+        pixels = ds.pixel_array
+        hu = pixels.astype(np.float64) * slope + intercept
         hu[mask[i]] = FACE_VALUE_HU
-        ds.PixelData = ((hu - intercept) / slope).astype(pixels.dtype).tobytes()
+        ds.PixelData = safe_cast((hu - intercept) / slope, pixels.dtype).tobytes()
         if "ImageComments" in ds:
             ds.ImageComments = str(ds.ImageComments) + " | de-faced (TotalSegmentator-face)"
         else:
@@ -149,7 +229,7 @@ def deface_one(input_path: Path, out_dir: Path, device: str, dilate_vox: int) ->
     out_dir.mkdir(parents=True, exist_ok=True)
     seg_dir = out_dir / "face_seg"
     is_dicom = input_path.is_dir()
-    suffix = "".join(input_path.suffixes).lower()
+    suffix = classify_suffix(input_path)
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
@@ -160,10 +240,10 @@ def deface_one(input_path: Path, out_dir: Path, device: str, dilate_vox: int) ->
             deface_dicom_dir(input_path, mask_path, out_dir / "dcm", dilate_vox)
             deface_nifti(nii_path, mask_path, out_dir / "deFaced.nii.gz", dilate_vox)
         elif suffix == ".nrrd":
-            stem = input_path.stem
+            stem = strip_known_suffix(input_path)
             deface_nrrd(input_path, mask_path, out_dir / f"{stem}_deFaced.nrrd", dilate_vox)
         else:
-            stem = input_path.stem.split(".")[0]
+            stem = strip_known_suffix(input_path)
             deface_nifti(input_path, mask_path, out_dir / f"{stem}_deFaced.nii.gz", dilate_vox)
 
     print(f"Done: {input_path.name}  ->  {out_dir}")
@@ -241,9 +321,8 @@ def discover_patients(patients_dir: Path, ct_globs: list[str]) -> list[tuple[Pat
                 if dcm_dir:
                     entries.append((dcm_dir, item.name))
         else:
-            suffix = "".join(item.suffixes).lower()
-            if suffix in (".nrrd", ".nii", ".nii.gz"):
-                entries.append((item, item.stem.split(".")[0]))
+            if classify_suffix(item):
+                entries.append((item, strip_known_suffix(item)))
     return entries
 
 
