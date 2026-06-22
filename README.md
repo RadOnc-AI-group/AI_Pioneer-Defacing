@@ -164,7 +164,10 @@ The `face_seg/` subfolder in each output directory contains the intermediate fac
 
 - **DICOM metadata is not anonymized.** This tool only removes facial features from the image pixel data. Patient name, date of birth, scan date, and other DICOM tags are left unchanged. If full anonymization is required, run the DICOM files through your institution's DICOM de-identification software before or after de-facing.
 - **Visual QC is strongly recommended.** After processing, open the output in a viewer (e.g. 3D Slicer) to confirm the face region has been correctly removed, especially for unusual scan geometries or positioning.
-- Processed voxels are replaced with -1000 HU (air). 
+- Processed voxels are replaced with -1000 HU (air).
+- Output pixel/voxel data type matches the input (e.g. `int16` stays `int16`); only the de-faced region's values change.
+- **DICOM output gets new instance UIDs.** Because the pixel data is modified, each de-faced DICOM file is written with a new `SOPInstanceUID`, and the whole de-faced series gets a new shared `SeriesInstanceUID`. `StudyInstanceUID` is left unchanged. This prevents the de-faced series from colliding with (or silently overwriting) the original series if both end up in the same PACS/viewer at the receiving center.
+- Input DICOM series using a compressed transfer syntax (e.g. JPEG2000) are automatically decompressed before de-facing; the output is always written uncompressed.
 
 ---
 
