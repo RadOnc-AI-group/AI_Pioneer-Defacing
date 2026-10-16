@@ -12,6 +12,8 @@ build/
 # Output folders (patient data — never commit)
 out_*/
 results/
+*_qc/
+*.partial/
 
 # OS
 .DS_Store
