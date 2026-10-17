@@ -244,8 +244,8 @@ Run `totalseg_set_license -l <YOUR_LICENSE_KEY>` with the key from your registra
 **"No patients found"** (batch mode)  
 Check `--depth` (patients grouped in sub-folders need `--depth 2`) and `--only`. For NIfTI/NRRD files with other names, use `--ct-glob`.
 
-**"verification: ... cannot represent it"**  
-The pixel encoding of the input cannot store the fill value (e.g. unsigned data without a negative rescale intercept). Convert the series to signed pixel data or a suitable rescale intercept first.
+**"the pixel encoding cannot store the fill values"** / **"verification: ... cannot store it"**  
+The pixel encoding of the input cannot store air (e.g. unsigned data without a negative rescale intercept). Convert the series to signed pixel data or a suitable rescale intercept first. The message lists the encoding (BitsStored, sign, slope, intercept) and examples of intended vs. written values. A few extreme fill values that a slice cannot store (e.g. when slices use different rescale intercepts) are set to the nearest storable value automatically; only if more than 5% are affected does the patient fail.
 
 **"face mask is EMPTY"**  
 TotalSegmentator found no face, e.g. in a CT of the neck or chest only. If the CT really shows no face, use `--allow-empty-mask`.

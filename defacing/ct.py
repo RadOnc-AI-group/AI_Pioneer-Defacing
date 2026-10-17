@@ -21,7 +21,7 @@ from pydicom.dataset import Dataset
 from pydicom.sequence import Sequence
 from pydicom.uid import generate_uid
 
-from .common import Options, PatientError, safe_cast
+from .common import Options, PatientError, log, safe_cast
 from .fill import apply_fill, fill_seed
 from .masks import applied_mask_sitk, mask_volume_ml, sitk_axes
 from .rt import Grid, renamed
@@ -64,38 +64,67 @@ def _mark_defaced(ds: Dataset, opts: Options, fill_info: dict) -> None:
     ds.DeidentificationMethodCodeSequence = Sequence(codes + [code])
 
 
-def _load_sorted(paths: list[Path]) -> tuple[np.ndarray, np.ndarray]:
-    """HU volume (slices sorted by position along the slice normal) and the sort order."""
+def _rescale(ds: Dataset) -> tuple[float, float]:
+    return float(getattr(ds, "RescaleSlope", 1) or 1), float(getattr(ds, "RescaleIntercept", 0) or 0)
+
+
+def stored_range(ds: Dataset, dtype: np.dtype) -> tuple[int, int]:
+    """Smallest and largest pixel value the file can store (BitsStored, sign, data type)."""
+    info = np.iinfo(dtype)
+    bits = int(getattr(ds, "BitsStored", info.bits) or info.bits)
+    if int(getattr(ds, "PixelRepresentation", 0)) == 1:
+        lo, hi = -(1 << (bits - 1)), (1 << (bits - 1)) - 1
+    else:
+        lo, hi = 0, (1 << bits) - 1
+    return max(lo, int(info.min)), min(hi, int(info.max))
+
+
+def _encoding(ds: Dataset) -> str:
+    slope, intercept = _rescale(ds)
+    return (f"BitsAllocated {getattr(ds, 'BitsAllocated', '?')}, BitsStored {getattr(ds, 'BitsStored', '?')}, "
+            f"{'signed' if int(getattr(ds, 'PixelRepresentation', 0)) == 1 else 'unsigned'}, "
+            f"slope {slope:g}, intercept {intercept:g}")
+
+
+def _load_sorted(paths: list[Path]) -> tuple[np.ndarray, np.ndarray, list[Dataset]]:
+    """HU volume (slices sorted by position along the slice normal), the sort order and the datasets."""
     dss = [pydicom.dcmread(p) for p in paths]
     iop = np.array(dss[0].ImageOrientationPatient, float)
     normal = np.cross(iop[:3], iop[3:])
     order = np.argsort([float(np.dot(normal, np.array(d.ImagePositionPatient, float))) for d in dss],
                        kind="stable")
-    vol = np.stack([dss[k].pixel_array.astype(np.float64) * float(getattr(dss[k], "RescaleSlope", 1))
-                    + float(getattr(dss[k], "RescaleIntercept", 0)) for k in order])
-    return vol, order
+    vol = np.stack([dss[k].pixel_array.astype(np.float64) * _rescale(dss[k])[0] + _rescale(dss[k])[1]
+                    for k in order])
+    return vol, order, dss
 
 
 def verify_written(in_paths: list[Path], out_paths: list[Path], image_hu: np.ndarray,
                    target_hu: np.ndarray, region: np.ndarray, fill: str, max_slope: float) -> None:
     """Independent read-back check of the written series (see module docstring)."""
-    vin, order_in = _load_sorted(in_paths)
-    vout, order_out = _load_sorted(out_paths)
+    vin, order_in, dss_in = _load_sorted(in_paths)
+    vout, order_out, _ = _load_sorted(out_paths)
     if vin.shape != image_hu.shape or not np.allclose(vin, image_hu, atol=0.5):
+        diff = float(np.abs(vin - image_hu).max()) if vin.shape == image_hu.shape else float("nan")
         raise PatientError("verification: the slice order/orientation of the series reader differs from "
                            "the slice positions in the files (gantry tilt? duplicate slices?); "
-                           "nothing was written for this patient")
+                           f"max difference {diff:g} HU; nothing was written for this patient")
     if not np.array_equal(order_in, order_out):
         raise PatientError("verification: slice positions changed in the written files")
     if not np.array_equal(vout[~region], vin[~region]):
         n = int((vout[~region] != vin[~region]).sum())
         raise PatientError(f"verification: {n} voxels OUTSIDE the face region were changed")
     # stored values are rounded, so the HU value can be off by half a rescale step
-    bad = np.abs(vout[region] - target_hu[region]) > 0.5 * abs(max_slope) + 1e-6
+    diff = np.abs(vout[region] - target_hu[region])
+    bad = diff > 0.5 * abs(max_slope) + 1e-3
     if bad.any():
         what = "-1000 HU" if fill == "constant" else "the fill values"
-        raise PatientError(f"verification: {int(bad.sum())} de-faced voxels do not hold {what}; the pixel "
-                           "encoding (data type / rescale slope and intercept) cannot represent it")
+        examples = ", ".join(f"{t:g} -> {w:g}" for t, w in
+                             list(zip(target_hu[region][bad], vout[region][bad]))[:3])
+        encodings = sorted({_encoding(d) for d in dss_in})
+        raise PatientError(
+            f"verification: {int(bad.sum())} de-faced voxels do not hold {what}; the pixel encoding probably "
+            f"cannot store it (fill {fill}; intended -> written HU: {examples}; max difference "
+            f"{float(diff.max()):g} HU; encoding: {' | '.join(encodings[:3])}{' | ...' if len(encodings) > 3 else ''})")
 
 
 def deface_ct_series(files: list, label: str, out_dir: Path, qc_dir: Path, qc_suffix: str,
@@ -143,6 +172,7 @@ def deface_ct_series(files: list, label: str, out_dir: Path, qc_dir: Path, qc_su
     out_paths: list[Path] = []
     frame_uid = ""
     max_slope = 1.0
+    n_fitted = n_written = 0
     for i, fname in enumerate(file_names):
         src = staged[Path(fname).name]
         ds = pydicom.dcmread(fname)
@@ -154,14 +184,35 @@ def deface_ct_series(files: list, label: str, out_dir: Path, qc_dir: Path, qc_su
         ds.SOPInstanceUID = generate_uid()
         ds.file_meta.MediaStorageSOPInstanceUID = ds.SOPInstanceUID
         ds.SeriesInstanceUID = new_series_uid
-        slope = float(getattr(ds, "RescaleSlope", 1))
-        intercept = float(getattr(ds, "RescaleIntercept", 0))
+        slope, intercept = _rescale(ds)
         max_slope = max(max_slope, abs(slope))
         pixels = ds.pixel_array.copy()
-        m = region[i]
+        # only voxels whose value changes are written; the others (e.g. padding outside the
+        # field of view) keep their stored value bit for bit
+        m = region[i] & (np.abs(target_hu[i] - image_hu[i]) > 1e-3)
         if m.any():
-            pixels[m] = safe_cast((target_hu[i][m] - intercept) / slope, pixels.dtype)
+            n_written += int(m.sum())
+            lo, hi = stored_range(ds, pixels.dtype)
+            vals = target_hu[i][m]
+            if opts.fill != "constant":
+                # sampled values come from several slices; a slice may store a smaller range
+                # (e.g. another rescale intercept). The few extreme values are fitted in (checked
+                # below); -1000 HU (constant) is never adjusted, so an encoding that cannot store
+                # it fails the verification.
+                hu_lo, hu_hi = sorted((lo * slope + intercept, hi * slope + intercept))
+                outside = (vals < hu_lo) | (vals > hu_hi)
+                if outside.any():
+                    n_fitted += int(outside.sum())
+                    vals = np.clip(vals, hu_lo, hu_hi)
+                    target_hu[i][m] = vals
+            pixels[m] = safe_cast(np.clip(np.round((vals - intercept) / slope), lo, hi), pixels.dtype)
         ds.PixelData = pixels.tobytes()
+        if n_fitted > 0.05 * max(n_written, 1) and n_fitted > 50:
+            # not a few extreme values but the fill itself: a solid block of the nearest storable
+            # value would show the outline of the face mask
+            raise PatientError(f"{label}: the pixel encoding cannot store the fill values ({n_fitted} of "
+                               f"{n_written} written voxels so far are outside the storable range; encoding: "
+                               f"{_encoding(ds)}); nothing was written for this patient")
         _mark_defaced(ds, opts, fill_info)
         target = out_dir / renamed(src.rel.name, src.sop_uid, ds.SOPInstanceUID)
         if target.exists():                            # same file name in two input folders
@@ -172,6 +223,10 @@ def deface_ct_series(files: list, label: str, out_dir: Path, qc_dir: Path, qc_su
 
     verify_written([Path(f) for f in file_names], out_paths, image_hu, target_hu, region, opts.fill,
                    max_slope)
+    if n_fitted:
+        fill_info["values_fitted_to_encoding"] = n_fitted
+        log.info(f"    {n_fitted} of {n_written} fill values were outside the range a slice can store and were "
+                 "set to the nearest storable value")
 
     # QC (confidential): raw face mask and the de-faced volume as NIfTI
     qc_dir.mkdir(parents=True, exist_ok=True)
