@@ -1,0 +1,8 @@
+# Direct Python dependencies of deface.py (Python 3.10). To install, use the exact versions of
+# all packages instead (as environment.yml does):  pip install -r requirements-lock.txt
+TotalSegmentator==2.14.0
+nibabel==5.4.2
+SimpleITK==2.5.5
+scipy==1.15.3
+pydicom==3.0.2
+python-gdcm==3.2.6

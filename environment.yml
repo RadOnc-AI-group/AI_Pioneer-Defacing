@@ -4,11 +4,6 @@ channels:
 dependencies:
   - python=3.10
   - pip
-  - dcm2niix
   - pip:
-      - TotalSegmentator==2.14.0
-      - nibabel==5.4.2
-      - SimpleITK==2.5.5
-      - scipy==1.15.3
-      - pydicom==3.0.2
-      - python-gdcm==3.2.6
+      # exact versions of all packages; the direct dependencies are listed in requirements.txt
+      - -r requirements-lock.txt
