@@ -1,0 +1,9 @@
+# Packages for the automated tests (tests/, run by .github/workflows/tests.yml): the pinned
+# packages of requirements.txt without TotalSegmentator, which the tests replace by a stand-in.
+#   pip install -r requirements-test.txt && python -m pytest
+nibabel==5.4.2
+SimpleITK==2.5.5
+scipy==1.15.3
+pydicom==3.0.2
+python-gdcm==3.2.6
+pytest==8.3.5

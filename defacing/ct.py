@@ -23,9 +23,10 @@ from pydicom.uid import generate_uid
 
 from .common import Options, PatientError, log, safe_cast
 from .fill import apply_fill, fill_seed
-from .masks import applied_mask_sitk, mask_volume_ml, sitk_axes
+from .masks import Axes, applied_mask_sitk, mask_volume_ml, sitk_axes
+from .qc import automatic_checks, write_qc_picture
 from .rt import Grid, renamed
-from .segment import run_totalsegmentator
+from .segment import check_empty_mask, run_totalsegmentator
 
 
 @dataclass
@@ -39,12 +40,17 @@ class SeriesResult:
     face_ml: float
     fill_info: dict
     flags: list[str] = field(default_factory=list)
+    face: np.ndarray | None = None            # the face mask itself on the grid (no margin, no extension)
+    before: np.ndarray | None = None          # input, int16 HU (for the ROI picture)
+    axes: Axes | None = None
+    qc_suffix: str = ""
 
 
 def _deid_method(opts: Options, fill_info: dict) -> list[str]:
     seed = f" seed={fill_info['seed']}" if "seed" in fill_info else ""
+    dilation = f"{fill_info['dilate_mm']:g}mm" if fill_info.get("dilate_mm") is not None else f"{opts.dilate}vox"
     return ["De-faced: TotalSegmentator face mask",
-            f"dilate={opts.dilate} extend_anterior={'yes' if opts.extend_anterior else 'no'}",
+            f"dilate={dilation} extend_anterior={'yes' if opts.extend_anterior else 'no'}",
             f"fill={opts.fill}{seed}"]
 
 
@@ -62,6 +68,17 @@ def _mark_defaced(ds: Dataset, opts: Options, fill_info: dict) -> None:
     code.CodeMeaning = "Clean Recognizable Visual Features Option"
     codes = list(ds.DeidentificationMethodCodeSequence) if "DeidentificationMethodCodeSequence" in ds else []
     ds.DeidentificationMethodCodeSequence = Sequence(codes + [code])
+
+
+def remove_icons(ds: Dataset) -> int:
+    """Delete every IconImageSequence (a thumbnail of the original, not de-faced image)."""
+    holders = [ds] + [item for elem in ds.iterall() if elem.VR == "SQ" for item in elem.value]
+    removed = 0
+    for item in holders:
+        if "IconImageSequence" in item:
+            del item.IconImageSequence
+            removed += 1
+    return removed
 
 
 def _rescale(ds: Dataset) -> tuple[float, float]:
@@ -154,18 +171,23 @@ def deface_ct_series(files: list, label: str, out_dir: Path, qc_dir: Path, qc_su
     seg_dir = tmp / "face_seg"
     mask_path = run_totalsegmentator(ct_nii, seg_dir, opts.device, tool_log)
     face_ml = mask_volume_ml(mask_path)
-    flags = []
-    if face_ml == 0:
-        msg = f"face mask is EMPTY for {label}: nothing was removed"
-        if not opts.allow_empty_mask:
-            raise PatientError(msg + " (use --allow-empty-mask if the CT has no face)")
-        flags.append(msg)
+    flags = check_empty_mask(face_ml, opts.allow_empty_mask, ct_nii, tmp / "head_seg", opts.device, tool_log, label)
+    dilate_mm = opts.dilate_mm
+    if not all(f.pixel_spacing for f in files):
+        dilate_mm = None
+        flags.append(f"{label}: voxel size unknown (no PixelSpacing): face mask dilated by {opts.dilate} voxels "
+                     f"instead of {opts.dilate_mm:g} mm")
+        log.warning(f"    ! {flags[-1]}")
 
-    region = applied_mask_sitk(sitk.ReadImage(str(mask_path)), image, opts.dilate, opts.extend_anterior)
     image_hu = sitk.GetArrayFromImage(image).astype(np.float64)
+    face = applied_mask_sitk(sitk.ReadImage(str(mask_path)), image, 0, False)
+    region = applied_mask_sitk(sitk.ReadImage(str(mask_path)), image, opts.dilate, opts.extend_anterior,
+                               hu=image_hu if face_ml else None, dilate_by_mm=dilate_mm)
     new_series_uid = generate_uid()
     seed = opts.seed if opts.seed is not None else fill_seed(new_series_uid)
-    target_hu, fill_info = apply_fill(image_hu, region, sitk_axes(image), opts.fill, seed)
+    axes = sitk_axes(image)
+    target_hu, fill_info = apply_fill(image_hu, region, axes, opts.fill, seed)
+    fill_info["dilate_mm"] = dilate_mm
 
     out_dir.mkdir(parents=True, exist_ok=True)
     sop_map: dict[str, str] = {}
@@ -214,6 +236,7 @@ def deface_ct_series(files: list, label: str, out_dir: Path, qc_dir: Path, qc_su
                                f"{n_written} written voxels so far are outside the storable range; encoding: "
                                f"{_encoding(ds)}); nothing was written for this patient")
         _mark_defaced(ds, opts, fill_info)
+        remove_icons(ds)
         target = out_dir / renamed(src.rel.name, src.sop_uid, ds.SOPInstanceUID)
         if target.exists():                            # same file name in two input folders
             target = target.with_name(f"{i:05d}_{target.name}")
@@ -228,8 +251,10 @@ def deface_ct_series(files: list, label: str, out_dir: Path, qc_dir: Path, qc_su
         log.info(f"    {n_fitted} of {n_written} fill values were outside the range a slice can store and were "
                  "set to the nearest storable value")
 
-    # QC (confidential): raw face mask and the de-faced volume as NIfTI
+    flags += automatic_checks(mask_path, target_hu, axes.si_axis, label)
+    # QC (confidential): raw face mask, the de-faced volume as NIfTI and the QC picture
     qc_dir.mkdir(parents=True, exist_ok=True)
+    write_qc_picture(image_hu, target_hu, region, axes, qc_dir / f"QC_defacing{qc_suffix}.png")
     shutil.copy2(mask_path, qc_dir / f"face_mask{qc_suffix}.nii.gz")
     defaced = sitk.GetImageFromArray(safe_cast(target_hu, np.int16))
     defaced.CopyInformation(image)
@@ -237,4 +262,5 @@ def deface_ct_series(files: list, label: str, out_dir: Path, qc_dir: Path, qc_su
 
     return SeriesResult(old_series_uid=files[0].series_uid, new_series_uid=new_series_uid,
                         frame_uid=frame_uid, sop_map=sop_map, grid=Grid.of(image), region=region,
-                        face_ml=face_ml, fill_info=fill_info, flags=flags)
+                        face_ml=face_ml, fill_info=fill_info, flags=flags, face=face,
+                        before=safe_cast(image_hu, np.int16), axes=axes, qc_suffix=qc_suffix)

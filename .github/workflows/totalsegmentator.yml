@@ -1,0 +1,78 @@
+# The real TotalSegmentator (CPU) on one real head CT: catches changes of the model, the
+# packages (requirements-lock.txt) or the TotalSegmentator command line that the stand-in of
+# the other tests cannot see. Needs two settings in the repository (Settings > Secrets and
+# variables > Actions):
+#   secret   TOTALSEG_LICENSE     the TotalSegmentator license key (the face model needs it)
+#   variable DEFACE_TEST_CT_URL   download URL of a public head CT that shows the face (.nii.gz,
+#                                 .nrrd, or a .zip of a DICOM folder); check its license
+#   variable DEFACE_TEST_FACE_ML  optional: expected face mask volume in ml (from a first run)
+# Without them the job only prints a notice. Secrets are not available to pull requests from
+# forks, so this runs by hand, weekly, and when the packages or the segmentation code change.
+name: totalsegmentator
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * 1"
+  push:
+    paths:
+      - requirements-lock.txt
+      - defacing/segment.py
+      - .github/workflows/totalsegmentator.yml
+
+jobs:
+  real-ct:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      TOTALSEG_LICENSE: ${{ secrets.TOTALSEG_LICENSE }}
+      TEST_CT_URL: ${{ vars.DEFACE_TEST_CT_URL }}
+      DEFACE_TEST_FACE_ML: ${{ vars.DEFACE_TEST_FACE_ML }}
+    steps:
+      - name: Check configuration
+        id: cfg
+        run: |
+          if [ -z "$TOTALSEG_LICENSE" ] || [ -z "$TEST_CT_URL" ]; then
+            echo "::notice::Set the secret TOTALSEG_LICENSE and the variable DEFACE_TEST_CT_URL to run this test."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/checkout@v4
+        if: steps.cfg.outputs.run == 'true'
+      - uses: actions/setup-python@v5
+        if: steps.cfg.outputs.run == 'true'
+        with:
+          python-version: "3.10"
+          cache: pip
+          cache-dependency-path: requirements-lock.txt
+      - name: Install (CPU build of torch, without the CUDA packages)
+        if: steps.cfg.outputs.run == 'true'
+        run: |
+          TORCH=$(grep -E "^torch==" requirements-lock.txt | cut -d' ' -f1)
+          python -m pip install "$TORCH" --index-url https://download.pytorch.org/whl/cpu
+          grep -v -E "^(nvidia-|triton)" requirements-lock.txt > "$RUNNER_TEMP/lock-cpu.txt"
+          python -m pip install -r "$RUNNER_TEMP/lock-cpu.txt" pytest==8.3.5
+      - name: Cache the model weights
+        if: steps.cfg.outputs.run == 'true'
+        uses: actions/cache@v4
+        with:
+          path: ~/.totalsegmentator
+          key: totalseg-weights-${{ hashFiles('requirements-lock.txt') }}
+      - name: Set the license and download the test CT
+        if: steps.cfg.outputs.run == 'true'
+        run: |
+          totalseg_set_license -l "$TOTALSEG_LICENSE"
+          mkdir -p "$RUNNER_TEMP/ct"
+          case "$TEST_CT_URL" in
+            *.zip)    curl -sSfL "$TEST_CT_URL" -o "$RUNNER_TEMP/ct.zip"
+                      unzip -q "$RUNNER_TEMP/ct.zip" -d "$RUNNER_TEMP/ct/dicom"
+                      echo "DEFACE_TEST_CT=$RUNNER_TEMP/ct/dicom" >> "$GITHUB_ENV" ;;
+            *.nrrd)   curl -sSfL "$TEST_CT_URL" -o "$RUNNER_TEMP/ct/ct.nrrd"
+                      echo "DEFACE_TEST_CT=$RUNNER_TEMP/ct/ct.nrrd" >> "$GITHUB_ENV" ;;
+            *)        curl -sSfL "$TEST_CT_URL" -o "$RUNNER_TEMP/ct/ct.nii.gz"
+                      echo "DEFACE_TEST_CT=$RUNNER_TEMP/ct/ct.nii.gz" >> "$GITHUB_ENV" ;;
+          esac
+      - name: Run the test
+        if: steps.cfg.outputs.run == 'true'
+        run: python -m pytest tests/test_totalsegmentator.py -v -s

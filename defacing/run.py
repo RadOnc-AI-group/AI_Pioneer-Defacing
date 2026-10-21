@@ -16,10 +16,13 @@ from pathlib import Path
 from .common import Options, PatientError, classify_suffix, log, strip_known_suffix
 from .patient import (OVERLAP_COLS, SCRIPT_VERSION, TARGET_TYPES, PatientResult, deface_dicom_patient,
                       deface_image_file)
+from .pii import PSEUDONYM_CHECKED
 from .segment import check_totalsegmentator
 
-DEFAULT_CT_GLOBS = ["*CT*.nrrd", "*CT*.nii.gz", "*CT*.nii", "*ct*.nrrd", "*ct*.nii.gz"]
+DEFAULT_CT_GLOBS = ["*CT*.nrrd", "*CT*.nii.gz", "*CT*.nii", "*ct*.nrrd", "*ct*.nii.gz", "*ct*.nii"]
 REPORTS_DIRNAME = "_reports"
+SMALL_MASK_FRACTION = 0.5       # face masks below this fraction of the run's median are reported ...
+SMALL_MASK_MIN_PATIENTS = 5     # ... once the run has this many face masks
 
 
 def setup_logging(log_file: Path | None = None) -> None:
@@ -119,10 +122,17 @@ def final_summary(results: list[PatientResult], reports: Reports, out_root: Path
         log.error(f"  --qc-dir. Delete them from {out_root} and rerun:")
         for r in legacy:
             log.error(f"    {r.rel}")
+    volumes = [v for r in results if r.status == "done" for v in r.face_mask_ml]
+    if len(volumes) >= SMALL_MASK_MIN_PATIENTS:
+        median = statistics.median(volumes)
+        for r in results:
+            small = [v for v in r.face_mask_ml if 0 < v < SMALL_MASK_FRACTION * median]
+            if r.status == "done" and small:
+                r.flags.append(f"face mask unusually small ({', '.join(f'{v:.0f}' for v in small)} ml, median of "
+                               f"this run {median:.0f} ml): check the QC picture")
     for r in results:
         for flag in r.flags:
             log.warning(f"  CHECK   {r.rel}: {flag}")
-    volumes = [v for r in results if r.status == "done" for v in r.face_mask_ml]
     if volumes:
         log.info(f"  Face mask volume (ml): min {min(volumes):.1f}, median {statistics.median(volumes):.1f}, "
                  f"max {max(volumes):.1f}. Check unusually small values in a viewer.")
@@ -171,6 +181,12 @@ def final_summary(results: list[PatientResult], reports: Reports, out_root: Path
             (log.warning if ln.startswith("!!!") else log.info)(ln)
 
     log.info(bar)
+    pseudonyms = [r for r in results if r.ids and any(r.ids.matches_folder(k, Path(r.rel).name)
+                                                      for k in PSEUDONYM_CHECKED)]
+    if pseudonyms:
+        log.warning(f"{len(pseudonyms)} patient(s): PatientName/PatientID equal the patient folder name and were "
+                    "counted as pseudonyms. If the folder names are real names or IDs (e.g. a PACS export by "
+                    "patient ID), they are NOT pseudonyms, and the output folder names identify the patients too.")
     with_ids = [r for r in results if (r.ids and r.ids.flagged(Path(r.rel).name)) or (not r.ids and r.pii)]
     if not opts.pii_check:
         log.warning("Metadata check DISABLED (--no-pii-check). Metadata was NOT anonymised.")
@@ -273,8 +289,21 @@ def discover(root: Path, depth: int, ct_globs: list[str]) -> list[tuple[str, Pat
         level = nxt
     for folder in level:
         rel = folder.relative_to(root).as_posix()
-        image = next((m for g in ct_globs for m in sorted(folder.glob(g)) if not m.name.startswith(".")), None)
-        entries.append(("image", image, rel) if image else ("dicom", folder, rel))
+        # dict: one entry per file, also where the globs overlap (case-insensitive file systems)
+        matches = list(dict.fromkeys(m for g in ct_globs for m in sorted(folder.glob(g))
+                                     if not m.name.startswith(".")))
+        if matches:
+            image = matches[0]
+            sidecar = strip_known_suffix(image) + ".json"
+            ignored = [c for c in folder.iterdir()
+                       if not c.name.startswith(".") and c != image and c.name != sidecar]
+            if ignored:
+                log.warning(f"{rel}: only {image.name} is de-faced (it matches --ct-glob); {len(ignored)} other "
+                            f"file(s)/folder(s) there are ignored, e.g. {sorted(c.name for c in ignored)[0]}"
+                            f"{' (DICOM files?)' if len(matches) == 1 else ''}")
+            entries.append(("image", image, rel))
+        else:
+            entries.append(("dicom", folder, rel))
     return sorted(entries, key=lambda e: e[2])
 
 

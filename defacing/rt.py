@@ -17,14 +17,17 @@ from pydicom.uid import generate_uid
 
 # ROI names are normalised (lower case, umlauts as ae/oe/ue, ß as ss) before matching.
 # A name that is one of these words, optionally followed by a number or a thickness
-# ("BODY_1", "Skin 5mm", "Haut_3mm"), is removed. A name that only CONTAINS one of the
+# ("BODY_1", "BODY (1)", "Skin 5mm", "Haut_3mm"), is removed. A name that only CONTAINS one of the
 # words ("Körperteile", "Body-PTV", "Glaskörper", "Wirbelkörper") is kept and reported.
 BODY_WORDS = ["body", "external", "outline", "koerper", "koerperkontur", "aussenkontur",
               "aussenkontour", "patient", "patientenkontur", "patientkontur"]
 SKIN_WORDS = ["skin", "haut", "hautkontur"]
 # Kept but reported: may follow the face surface (immobilisation mask, bolus, shell)
-FACE_SHAPE_WORDS = ["mask", "maske", "bolus", "shell", "schale"]
-_SUFFIX = r"[\s_\-.]*(\d+([.,]\d+)?\s*(mm|cm)?)?"
+FACE_SHAPE_WORDS = ["mask", "maske", "bolus", "shell", "schale", "thermo", "fixation", "immobili"]
+# RTROIInterpretedTypes that are kept but reported: a bolus or a fixation device (e.g. the
+# thermoplastic mask) moulded to the face shows its shape
+FACE_SHAPE_TYPES = {"BOLUS", "FIXATION"}
+_SUFFIX = r"[\s_\-.]*(\(?\d+([.,]\d+)?\s*(mm|cm)?\)?)?"
 _BODY_RE = re.compile(rf"(?:{'|'.join(BODY_WORDS)}){_SUFFIX}")
 _SKIN_RE = re.compile(rf"(?:{'|'.join(SKIN_WORDS)}){_SUFFIX}")
 _UNCLEAR_RE = re.compile("|".join(["body", "external", "outline", "koerper", "aussenkont", "skin",
@@ -45,7 +48,7 @@ def classify_roi(name: str, kind: str) -> str:
         return "body"
     if _SKIN_RE.fullmatch(n):
         return "skin"
-    if kind == "BOLUS" or _UNCLEAR_RE.search(n):
+    if kind in FACE_SHAPE_TYPES or _UNCLEAR_RE.search(n):
         return "unclear"
     return ""
 

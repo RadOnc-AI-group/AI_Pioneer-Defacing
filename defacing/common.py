@@ -24,7 +24,8 @@ class PatientError(Exception):
 @dataclass
 class Options:
     device: str = "cpu"
-    dilate: int = 2
+    dilate_mm: float = 3.0          # margin around the face mask
+    dilate: int = 2                 # the margin in voxels, if the voxel size is unknown
     extend_anterior: bool = True
     fill: str = "air"
     seed: int | None = None
@@ -38,8 +39,8 @@ class Options:
 
     def settings(self) -> dict:
         """Settings that change the output; stored in the manifest of every patient."""
-        return {"dilate": self.dilate, "extend_anterior": self.extend_anterior, "fill": self.fill,
-                "keep_body": self.keep_body, "keep_skin": self.keep_skin,
+        return {"dilate_mm": self.dilate_mm, "dilate": self.dilate, "extend_anterior": self.extend_anterior,
+                "fill": self.fill, "keep_body": self.keep_body, "keep_skin": self.keep_skin,
                 "keep_rtplan": self.keep_rtplan, "keep_rtdose": self.keep_rtdose,
                 "remove_roi": [p.pattern for p in self.remove_roi]}
 

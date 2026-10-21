@@ -10,7 +10,7 @@ Batch (one patient per folder, optionally nested: --depth 2 for <group>/<patient
     python deface.py --batch <patients_dir> -o <output_dir> [--depth N] [--ct-glob "*CT*.nrrd"]
 
 What is done by default (see README.md for details):
-  * every CT series is de-faced: the TotalSegmentator "face" mask, dilated and extended
+  * every CT series is de-faced: the TotalSegmentator "face" mask, dilated by 3 mm and extended
     to the anterior image edge, is filled with air sampled from the same scan; new UIDs
   * RTSTRUCTs are copied and linked to the de-faced CT; the Body/External and Skin/Haut
     contours are removed (--keep-body / --keep-skin keep them); unclear names are reported
@@ -19,7 +19,7 @@ What is done by default (see README.md for details):
   * the written DICOM is read back and verified against the face mask
   * the metadata is checked for patient-identifying data (--no-pii-check skips it); it is
     NOT anonymised
-  * face masks, removed contours and reports go to the QC folder (default <output>_qc),
+  * face masks, QC pictures, removed contours and reports go to the QC folder (default <output>_qc),
     which is confidential and must not be shared with the output
 """
 import argparse
@@ -52,8 +52,11 @@ def main() -> int:
 
     seg = p.add_argument_group("de-facing")
     seg.add_argument("-d", "--device", default="cpu", help="cpu, gpu or mps (default: cpu)")
-    seg.add_argument("--dilate", type=int, default=2,
-                     help="Voxels to dilate the face mask by for safety margin (default: 2)")
+    seg.add_argument("--dilate-mm", type=float, default=3.0, metavar="MM",
+                     help="Safety margin around the face mask in millimetres (default: 3)")
+    seg.add_argument("--dilate", type=int, default=2, metavar="N",
+                     help="The margin in voxels, used only if the voxel size of an image is unknown "
+                          "(a warning is shown; default: 2)")
     ext = seg.add_mutually_exclusive_group()
     ext.add_argument("--extend-anterior", dest="extend_anterior", action="store_true", default=True,
                      help="Also remove everything between the face mask and the anterior image edge, e.g. "
@@ -66,7 +69,8 @@ def main() -> int:
                           "tissue and air) or 'constant' (-1000 HU; reveals the outline of the face mask)")
     seg.add_argument("--seed", type=int, help="Random seed of the air/soft-tissue fill (default: from the new UID)")
     seg.add_argument("--allow-empty-mask", action="store_true",
-                     help="Accept images where no face was found instead of failing them")
+                     help="Accept CT series where no face was found instead of failing them, but only if "
+                          "TotalSegmentator finds no head (skull, brain) in them either")
 
     rt = p.add_argument_group("RT objects")
     rt.add_argument("--keep-body", action="store_true", help="Keep Body/External contours (they show the face)")
@@ -97,11 +101,13 @@ def main() -> int:
         p.error("--depth must be 1 or more")
     if args.dilate < 0:
         p.error("--dilate must be 0 or more")
+    if not 0 <= args.dilate_mm < 1000:
+        p.error("--dilate-mm must be 0 or more (and finite)")
 
-    opts = Options(device=args.device, dilate=args.dilate, extend_anterior=args.extend_anterior,
-                   fill=args.fill, seed=args.seed, keep_body=args.keep_body, keep_skin=args.keep_skin,
-                   keep_rtplan=args.keep_rtplan, keep_rtdose=args.keep_rtdose, remove_roi=args.remove_roi,
-                   pii_check=not args.no_pii_check, allow_empty_mask=args.allow_empty_mask)
+    opts = Options(device=args.device, dilate_mm=args.dilate_mm, dilate=args.dilate,
+                   extend_anterior=args.extend_anterior, fill=args.fill, seed=args.seed,
+                   keep_body=args.keep_body, keep_skin=args.keep_skin, keep_rtplan=args.keep_rtplan,
+                   keep_rtdose=args.keep_rtdose, remove_roi=args.remove_roi, pii_check=not args.no_pii_check, allow_empty_mask=args.allow_empty_mask)
     out = args.output.expanduser().resolve()
     qc = (args.qc_dir or out.with_name(out.name + "_qc")).expanduser().resolve()
     if qc == out or out in qc.parents:

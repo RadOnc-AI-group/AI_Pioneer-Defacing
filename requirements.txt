@@ -1,5 +1,5 @@
-# Python dependencies of deface.py (Python 3.10). Same pins as environment.yml.
-#   pip install -r requirements.txt
+# Direct Python dependencies of deface.py (Python 3.10). To install, use the exact versions of
+# all packages instead (as environment.yml does):  pip install -r requirements-lock.txt
 TotalSegmentator==2.14.0
 nibabel==5.4.2
 SimpleITK==2.5.5

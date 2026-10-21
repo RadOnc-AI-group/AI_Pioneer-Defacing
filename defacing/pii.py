@@ -32,6 +32,10 @@ INDIRECT_IDENTIFIERS = [
 ]
 # A patient's name/ID equal to the patient folder name (e.g. TUM_401) counts as a pseudonym.
 PSEUDONYM_CHECKED = {"PatientName", "PatientID"}
+# Burned-in text (e.g. the patient's name drawn into the pixels): very bright pixels outside
+# the body and the devices, at the same position in most slices
+TEXT_MIN_HU = 1500.0
+TEXT_MIN_PIXELS = 10
 # Metadata keys in NRRD headers or JSON sidecars that suggest patient-identifying data
 PII_KEY_RE = re.compile(r"patient|birth|institution|physician|operator|accession|0010[|,._ ]?[0-9a-f]{4}",
                         re.I)
@@ -121,6 +125,9 @@ def header_findings(input_path: Path) -> list[str]:
                 text = np.asarray(header[name]).tobytes().decode("latin-1").strip("\x00 ")
                 if text:
                     found.add(f"NIfTI header '{name}' (free text)")
+        # extensions can hold a whole DICOM header (code 2), JSON or other metadata
+        for ext in getattr(header, "extensions", []):
+            found.add(f"NIfTI header extension (code {ext.get_code()})")
     sidecar = input_path.with_name(strip_known_suffix(input_path) + ".json")
     if sidecar.is_file():
         try:
@@ -134,3 +141,27 @@ def header_findings(input_path: Path) -> list[str]:
         log.warning(f"    ! PII: {input_path.name} may contain identifying metadata: {'; '.join(findings)}"
                     " (headers are copied to the output)")
     return findings
+
+
+def burned_in_text_pixels(hu: np.ndarray, si_axis: int) -> int:
+    """
+    Number of in-plane positions that are very bright (>= TEXT_MIN_HU) outside every large
+    object (body, couch, devices) in at least half of the slices: text or graphics drawn
+    into the images (names, dates, rulers) look like this, anatomy and metal inside the
+    body do not. Metal outside the body along the head-feet axis (e.g. the posts of a
+    stereotactic frame) can also be counted, so the result is a hint for a visual check.
+    """
+    from scipy.ndimage import binary_dilation, binary_fill_holes, label
+    h = np.moveaxis(hu, si_axis, 0)
+    count = np.zeros(h.shape[1:], np.int32)
+    min_object = max(50, h.shape[1] * h.shape[2] // 500)     # letters are smaller than this
+    for s in h:
+        bright = s >= TEXT_MIN_HU
+        if not bright.any():
+            continue
+        lab, _ = label(s > -500.0)
+        sizes = np.bincount(lab.ravel())
+        sizes[0] = 0
+        large = binary_fill_holes(np.isin(lab, np.flatnonzero(sizes >= min_object)))
+        count += bright & ~binary_dilation(large, iterations=3)
+    return int((count >= max(3, 0.5 * len(h))).sum())
