@@ -259,8 +259,9 @@ def _box_contour(x, y, z) -> list[float]:
 def write_rtstruct(path: Path, ct: CTSeries, rois: list[tuple[str, str]] | None = None,
                    patient: str = "PAT01") -> Dataset:
     """RTSTRUCT on ct. rois: (name, RTROIInterpretedType); geometry by name:
-    names containing 'eye'/'lips' -> box in the face region; 'ptv'/'brain' -> small ellipse in
-    the centre; anything else -> the outer head outline."""
+    names containing 'nose' -> box in the nose; 'large' -> box over most of the face; 'half' -> box
+    over about a third of the face; 'eye'/'lips' -> box in the face region; 'ptv'/'brain' -> small
+    ellipse in the centre; anything else -> the outer head outline."""
     rois = rois or [("BODY", "EXTERNAL"), ("PTV_60", "PTV"), ("Eye_L", "ORGAN")]
     sop = generate_uid()
     ds = Dataset()
@@ -298,7 +299,19 @@ def write_rtstruct(path: Path, ct: CTSeries, rois: list[tuple[str, str]] | None 
         cs = Sequence()
         for k, z in enumerate(zs):
             low = name.lower()
-            if "eye" in low or "lips" in low:
+            if "nose" in low:
+                if not (NOSE[2][0] + 3 <= z <= NOSE[2][1] - 3):
+                    continue
+                data = _box_contour((-8, 8), (-100, -70), z)
+            elif "large" in low:
+                if not (FACE_Z[0] <= z <= FACE_Z[1]):
+                    continue
+                data = _box_contour((-52, 52), (-112, -58), z)
+            elif "half" in low:
+                if not (FACE_Z[0] <= z <= FACE_Z[1]):
+                    continue
+                data = _box_contour((-20, 20), (-112, -58), z)
+            elif "eye" in low or "lips" in low:
                 if not (-20 <= z <= 10):
                     continue
                 data = _box_contour((-30, -10), (-84, -70), z)
@@ -329,6 +342,46 @@ def write_rtstruct(path: Path, ct: CTSeries, rois: list[tuple[str, str]] | None 
     path.parent.mkdir(parents=True, exist_ok=True)
     ds.save_as(path, enforce_file_format=True)
     return ds
+
+
+def write_dose(path: Path, ct: CTSeries, *, frames: int = 16, spacing=(8.0, 8.0, 8.0), value: int = 1000,
+               descending: bool = False, patient: str = "PAT01") -> tuple[Dataset, np.ndarray]:
+    """RTDOSE on a coarser axial grid around the origin, with the frame of reference of ct;
+    the dose is `value` everywhere. Returns (dataset, LPS position of every voxel)."""
+    sop = generate_uid()
+    ds = Dataset()
+    ds.file_meta = _file_meta(RTDOSE_STORAGE, sop)
+    ds.SOPClassUID, ds.SOPInstanceUID = RTDOSE_STORAGE, sop
+    ds.Modality = "RTDOSE"
+    _patient(ds, patient, ct.study_uid, ct.frame_uid)
+    ds.SeriesInstanceUID = generate_uid()
+    dc, dr, dz = spacing
+    nr, nc = 40, 40
+    z0 = (frames - 1) / 2 * dz if descending else -(frames - 1) / 2 * dz
+    origin = np.array([-(nc - 1) / 2 * dc, -(nr - 1) / 2 * dr, z0])
+    step = -dz if descending else dz
+    ds.ImagePositionPatient = [f"{v:.3f}" for v in origin]
+    ds.ImageOrientationPatient = ["1", "0", "0", "0", "1", "0"]
+    ds.PixelSpacing = [f"{dr:g}", f"{dc:g}"]
+    ds.SliceThickness = f"{dz:g}"
+    ds.NumberOfFrames = frames
+    # the grid runs along the normal (+z) in steps of `step`
+    ds.GridFrameOffsetVector = [f"{k * step:g}" for k in range(frames)]
+    ds.Rows, ds.Columns = nr, nc
+    ds.SamplesPerPixel = 1
+    ds.PhotometricInterpretation = "MONOCHROME2"
+    ds.BitsAllocated, ds.BitsStored, ds.HighBit = 16, 16, 15
+    ds.PixelRepresentation = 0
+    ds.DoseUnits, ds.DoseType, ds.DoseSummationType = "GY", "PHYSICAL", "PLAN"
+    ds.DoseGridScaling = "0.001"
+    dose = np.full((frames, nr, nc), value, np.uint16)
+    ds.PixelData = dose.tobytes()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    ds.save_as(path, enforce_file_format=True)
+    k, r, c = np.meshgrid(np.arange(frames), np.arange(nr), np.arange(nc), indexing="ij")
+    world = origin + c[..., None] * dc * np.array([1.0, 0, 0]) + r[..., None] * dr * np.array([0, 1.0, 0]) \
+        + k[..., None] * step * np.array([0, 0, 1.0])
+    return ds, world
 
 
 def write_simple(path: Path, modality: str, sop_class: str, ct: CTSeries | None = None,

@@ -36,13 +36,25 @@ class Options:
     remove_roi: list[re.Pattern] = field(default_factory=list)
     pii_check: bool = True
     allow_empty_mask: bool = False
+    deface_targets: bool = False    # True: target volumes inside the region are de-faced as well
+    keep_roi: list[re.Pattern] = field(default_factory=list)     # also keep these ROIs' voxels
+    not_target: list[re.Pattern] = field(default_factory=list)   # never count these ROIs as targets
+    clip_body: bool = False
+    mask_rtdose: bool = False
+    anatomy_check: bool = False
+    face_check: bool = False
+    face_check_flag: str = "match"
+    face_check_fail: str = "never"
+    face_check_threshold: float = 0.30
 
     def settings(self) -> dict:
         """Settings that change the output; stored in the manifest of every patient."""
         return {"dilate_mm": self.dilate_mm, "dilate": self.dilate, "extend_anterior": self.extend_anterior,
                 "fill": self.fill, "keep_body": self.keep_body, "keep_skin": self.keep_skin,
                 "keep_rtplan": self.keep_rtplan, "keep_rtdose": self.keep_rtdose,
-                "remove_roi": [p.pattern for p in self.remove_roi]}
+                "remove_roi": [p.pattern for p in self.remove_roi], "deface_targets": self.deface_targets,
+                "keep_roi": [p.pattern for p in self.keep_roi], "not_target": [p.pattern for p in self.not_target],
+                "clip_body": self.clip_body, "mask_rtdose": self.mask_rtdose}
 
 
 def classify_suffix(path: Path) -> str:

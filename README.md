@@ -116,11 +116,12 @@ For NIfTI/NRRD, the tool looks for files matching `*CT*.nrrd`, `*CT*.nii.gz`, `*
 | Content | Default | Change with |
 |---|---|---|
 | CT series (all, except localizers/scouts) | de-faced: face mask dilated by 3 mm, extended to the anterior image edge, filled with air sampled from the same scan; new SOP Instance and Series UIDs | `--dilate-mm`, `--no-extend-anterior`, `--fill` |
+| Target volumes (GTV/CTV/PTV/ITV, Lymphabflusswege, Zielvolumen) inside the de-faced region | **voxels kept** (see [Target volumes](#target-volumes-inside-the-de-faced-region)) | `--deface-targets`, `--keep-roi`, `--not-target` |
 | RTSTRUCT | copied; UIDs remapped so it still refers to the de-faced CT | |
-| ↳ Body/External contour | **removed** (it traces the skin, i.e. the face) | `--keep-body` |
+| ↳ Body/External contour | **removed** (it traces the skin, i.e. the face) | `--clip-body`, `--keep-body` |
 | ↳ Skin/Haut contour | **removed** | `--keep-skin` |
 | ↳ other contours (targets, organs at risk) | kept unchanged; names that might follow the skin are reported | `--remove-roi REGEX` |
-| RTDOSE | **not copied** (the dose is zero outside the body, so it outlines the face) | `--keep-rtdose` |
+| RTDOSE | **not copied** (the dose is zero outside the body, so it outlines the face) | `--mask-rtdose`, `--keep-rtdose` |
 | RTPLAN, RTRECORD | **not copied** | `--keep-rtplan` |
 | CT localizers/scouts, MR, PET, REG, RT images, non-DICOM files | not copied (cannot be de-faced); listed in the log | |
 | CT objects that are no single-frame CT image volume: Enhanced (multi-frame) CT, secondary captures (screenshots, dose reports), series with fewer than 3 images or with images of different orientations | not copied (cannot be de-faced); listed in the log | |
@@ -154,6 +155,16 @@ The removed contours are saved in the QC folder as a separate RTSTRUCT that refe
 | `--keep-body`, `--keep-skin` | off | Keep the Body/External or Skin/Haut contours |
 | `--keep-rtdose`, `--keep-rtplan` | off | Copy RTDOSE, or RTPLAN and RTRECORD files |
 | `--remove-roi REGEX` | | Also remove ROIs whose whole name matches (case-insensitive, repeatable) |
+| `--deface-targets` | off (targets kept) | Replaces the voxels of target volumes inside the region as well |
+| `--keep-roi REGEX` | | Also keep the voxels of ROIs whose whole name matches (case-insensitive, repeatable); overrules the size limit, not Body/Skin |
+| `--not-target REGEX` | | Never count ROIs whose whole name matches as targets (case-insensitive, repeatable) |
+| `--clip-body` | off | Keeps Body/External, cut back to the image that remains (see [Clipped Body contour](#clipped-body-contour)). Cannot be combined with `--keep-body` |
+| `--mask-rtdose` | off | Copies RTDOSE with the dose set to zero in the de-faced region. Cannot be combined with `--keep-rtdose` |
+| `--anatomy-check` | off | Reports tissue left in front of landmarks behind the face (more TotalSegmentator runs, no license needed) |
+| `--face-check` | off | Scores each CT with a face recognition model (needs the optional packages) |
+| `--face-check-flag match` / `any` / `none` | `match` | Which face check result is a CHECK line |
+| `--face-check-fail never` / `match` / `any` | `never` | Which face check result fails the patient, so that nothing is written |
+| `--face-check-threshold D` | `0.30` | Cosine distance below which two faces count as the same |
 | `--qc-dir DIR` | `<output>_qc` | Confidential folder for face masks, QC pictures, removed contours, reports and logs |
 | `--no-pii-check` | off (check runs) | Skips the metadata check |
 | `--allow-empty-mask` | off | Accepts CT series in which no face was found, but only if TotalSegmentator's `total` model (fastest, 6 mm, no license needed) finds no head (skull, brain, together at least 20 ml) in them either, e.g. a chest CT next to the head CT of the same patient. A series that includes the head but has no face mask always fails the patient |
@@ -224,6 +235,96 @@ The final summary lists the ROIs that overlap the region and how many targets (C
 
 For every structure set with ROIs that overlap the de-faced region or lie within 10 mm of it, `QC_roi_overlap*.png` shows the same side and front views as `QC_defacing*.png` (of the input), the de-faced region in blue, and each of these ROIs in its own colour: the part inside the region filled, the outline of the whole ROI drawn. The legend in the picture names each ROI with its percentage and volume inside the region, or its distance; the most affected ROIs come first (at most 12, the rest are in the CSV). Note that a side or front view is a projection: an outline that crosses the blue area does not mean overlap, a filled part does. Like all QC files, the picture is confidential.
 
+### Target volumes inside the de-faced region
+
+Target volumes in the de-faced region keep their voxels, so radiotherapy planning data stays usable. The rest of the region is filled as usual. The fill itself does not change: it is computed for the whole region, and the target voxels are then left as they were. Only DICOM input has contours. For NIfTI/NRRD the whole region is replaced, and the log says so.
+
+A ROI counts as a target by its `RTROIInterpretedType` (`PTV`, `CTV`, `GTV`) or by a name that **starts** with one of these words, case-insensitively and with umlauts written out:
+
+- `PTV`, `CTV`, `GTV`, `ITV`, also combined such as `GTVp`, `CTVn`, `GTVLK`, `PTV_70`, `PTVges`;
+- `LAW`, `LAW_re`, `LAW li`, `Lymphabflusswege`;
+- `ZV`, `ZV_60Gy`, `Zielvolumen`, `Planungszielvolumen`, `Klinisches Zielvolumen`, `Makroskopisches Tumorvolumen`;
+- the full English terms (`Planning Target Volume`, `Gross Tumour Volume`, ...).
+
+Not kept, and reported, are helper structures and anything that may follow the skin: names with a helper prefix (`z_PTV`, `x_CTV`), `ring`, `opt`, `avoid`, `NonPTV`, `Hilfs...`, expansions and subtractions (`PTV+5mm`, `PTV70-PTV60`), and every name that is Body, Skin or unclear ([Body and Skin contours](#body-and-skin-contours)), such as `Body-PTV` or `PTV-Haut`. Bare `Boost`, `Tumorbett`, `LK` and `Lymphknoten` are not targets either. Check the dry run: it lists kept and rejected names. Use `--keep-roi` and `--not-target` for the names of your site.
+
+| Share of the face mask a target covers | Result |
+|---|---|
+| less than 25% | kept |
+| 25% to less than 75% | kept, and reported with a CHECK line |
+| 75% or more | **not kept** (probably not a true target), reported; `--keep-roi` keeps it |
+
+**Where a target reaches the skin, that part of the surface stays visible** in a 3D rendering. `target_exposed_cm2` in `patients_*.csv` gives the area seen from the front where kept tissue has at most 5 mm of tissue in front of it, and a CHECK line is shown above 5 cm². `is_target` and `ml_kept_in_region` in the [ROI overlap report](#roi-overlap-report) show what was kept. `--deface-targets` gives the output of tool version 5 (no voxels kept).
+
+### Clipped Body contour
+
+Planning systems and some dose metrics expect a Body/External contour. With `--clip-body` it is kept, cut back to what remains of the image. On a slice through the nose, the original contour runs around the back of the head, along the cheeks, and around the nose tip. The clipped contour follows the back of the head and the cheeks as before, then runs across the midface along the edge of the de-faced region. Slices that the region does not touch are unchanged.
+
+This adds no information about the face: anyone can get nearly the same outline by thresholding the de-faced CT. On affected slices the contour is traced again from the remaining voxels, so no original point remains there, and it is checked against those voxels. Kept target voxels remain part of the Body, and with `--fill soft-tissue` so does the new front of the head. The original contour is saved in `removed_rois/BEFORE_CLIP_*` in the QC folder.
+
+Use it only if recipients need an External contour; deleting it remains the default. Dose recalculation at the front of the head is unreliable either way, because the tissue is gone.
+
+### Masked RTDOSE
+
+With `--mask-rtdose` the RTDOSE file is copied with the dose set to zero in the de-faced region, so that it no longer outlines the face. A dose voxel is set to zero if it touches a de-faced CT voxel, unless its centre lies in a kept target, which keeps its dose. The CT is found by its Frame of Reference; a file without a matching CT is not copied, and the patient is flagged. The result is read back and verified. A dose-volume histogram stored in the file describes the original plan and does not change.
+
+### Anatomy check
+
+`--anatomy-check` catches a partial face mask. It runs TotalSegmentator's open tasks `head_glands_cavities` and `craniofacial_structures` (no license needed) and reports unchanged tissue in front of landmarks that the face mask does not depend on: the nasal cavity (nose), teeth (lips), lenses (eyelids) and mandible (chin, report only). TotalSegmentator has no nose class of its own. It also reports brain inside the de-faced region and a nasal cavity that is not in front of the brain (wrong orientation).
+
+The results go to the manifest and to `anatomy_check` in `patients_*.csv`. It only adds CHECK lines. Run it on a few typical cases of a protocol first: **the thresholds are starting values and have not been calibrated on real scans** (a mask that ends just behind the lips leaves tissue in front of the teeth without showing the face).
+
+### Face check
+
+`--face-check` scores each CT with a face recognition model: the CT is rendered as a surface before and after de-facing, from the front and turned 30° to each side; RetinaFace looks for a face, and FaceNet512 compares the two renders.
+
+```
+pip install -r requirements-reid.txt
+python -m defacing.reid --download       # once, with internet access
+```
+
+| `face_check` in `patients_*.csv` | Meaning | Default action |
+|---|---|---|
+| `match` | a face is found after de-facing, and it matches the original render | CHECK line |
+| `face_found` | a face is found after de-facing, but it does not match | reported in the log and the summary |
+| `no_face` | no face is found after de-facing | |
+| `inconclusive` | no render shows a face, so the score says nothing | |
+
+`face_check_score` is the highest cosine similarity of the views (0 if no face is found after de-facing, empty if inconclusive). `--face-check-flag` changes what is a CHECK line, and `--face-check-fail` fails the patient so that nothing is written. Renders and embeddings are not stored, only the scores.
+
+**A good score is not proof of anonymity.** It is a proxy: the models were not trained on CT renders, they compare the patient with themselves rather than with other people, and the threshold has not been calibrated on CT renders. The packages are MIT licensed, but the models keep their own terms: check these before commercial use.
+
+### Already de-faced scans
+
+A CT whose header records de-facing (`DeidentificationMethod`, `ImageComments`, code 113102), whose file name says so, or with a large block of a single exact air value in front of the head gets a CHECK line. It is de-faced as usual: a poorly de-faced scan must not pass through. If the face mask is then empty, the patient fails as for any scan, and the message says it appears to be already de-faced.
+
+### Timing report
+
+`timing_*.csv` in the QC folder gives, per patient, the device, the machine and the seconds of each stage (`read`, `segment`, `mask`, `targets`, `fill`, `write`, `verify`, `qc`, `rt_copy`, and the optional checks). The final summary gives the median and interquartile range per stage and device. The optional checks are separate columns, so that the time of the pipeline itself can be reported without them.
+
+### Residual risks and evidence
+
+De-facing reduces the risk of recognising a patient from their CT. It does not remove it.
+
+- **Faces can be recognised from CT.** In a set of 1404 head CT renderings, a re-identification classifier reached an AUC of 0.69 without de-facing and 0.55 after de-facing with the TotalSegmentator face mask, close to chance, and 0.60 with CTA-DEFACE [1, 3]. In head and neck CT, face matching fell from 97% to 4% after de-facing [2]. In neither case is the risk zero.
+- **Kept target volumes** preserve the voxels inside them, including skin where a target reaches it (see [Target volumes](#target-volumes-inside-the-de-faced-region)). In one head and neck cohort, 4.9% of PTVs overlapped the removed area [2].
+- **The skull remains**, and bone can carry identifying information.
+- **Generative models may restore faces.** Diffusion models have reconstructed faces close to the originals from de-faced head MRI [6]. This has been shown for MRI; we did not find a study on CT. Removing all soft tissue in front of the face limits what such a model can use, but this has not been tested.
+- **Structures on the face lose image content.** Automatic segmentation of on-face structures (oral cavity, eyes, lacrimal glands) was affected by de-facing, off-face structures much less, in 50 head and neck CTs de-faced with other tools [4]. Use the [ROI overlap report](#roi-overlap-report) to exclude affected structures.
+- **Other tools do not transfer.** Results for MRI defacers (e.g. failure of several tools on head and neck MRI [5]) say little about CT, and vice versa.
+- **The checks are limited.** Visual QC is the reference. The anatomy and face checks can miss problems, and both can raise false alarms.
+- **License.** TotalSegmentator's `face` task is free for non-commercial use only; commercial use requires a license from its author [7]. The tasks used by `--anatomy-check` are listed as openly usable. No other face model is supported at present; [CADS](https://github.com/murong-xu/CADS) has a `Face` class and CC BY-SA 4.0 weights that allow commercial use, which could be compared with the TotalSegmentator mask in future (not evaluated here).
+
+References
+
+1. Lindholz M, et al. Analyzing the TotalSegmentator for facial feature removal in head CT scans. *Radiography* 2025;31(1):372-378. doi:10.1016/j.radi.2024.12.018
+2. O'Sullivan-Steben, et al. Development of a defacing algorithm to protect the privacy of head and neck cancer patients in publicly-accessible radiotherapy datasets. *Med Phys* 2025. arXiv:2508.13914
+3. Deep learning-based defacing tool for CT angiography: CTA-DEFACE. *Eur Radiol Exp* 2024. doi:10.1186/s41747-024-00510-9
+4. Ammar A, et al. Evaluating the impact of different deface algorithms on deep learning segmentation software performance. *Front Oncol* 2025;15:1603593. doi:10.3389/fonc.2025.1603593
+5. Sahlsten J, et al. Segmentation stability of human head and neck cancer medical images for radiotherapy applications under de-identification conditions. *Front Oncol* 2023;13:1120392. doi:10.3389/fonc.2023.1120392
+6. Gao, et al. Pitfalls of defacing whole-head MRI: re-identification risk with diffusion models and compromised research potential. *Comput Biol Med* 2025;197:111112. arXiv:2501.18834
+7. Wasserthal J, et al. TotalSegmentator: robust segmentation of 104 anatomic structures in CT images. *Radiol Artif Intell* 2023;5(5):e230024. Licensing: https://github.com/wasserth/TotalSegmentator
+
 ---
 
 ## Output
@@ -240,7 +341,7 @@ results/patient01_qc/                 CONFIDENTIAL, never share together with th
 ├── QC_roi_overlap.png                ROIs in or near the de-faced region (if there are any)
 ├── removed_rois/REMOVED_RS....dcm    removed contours, linked to the de-faced CT
 ├── roi_overlap.csv, manifest.json, tool.log
-└── patients_*.csv, identifying_tags_*.csv, roi_overlap_*.csv   reports
+└── patients_*.csv, identifying_tags_*.csv, roi_overlap_*.csv, timing_*.csv   reports
 ```
 
 In batch mode, the QC folder holds one such folder per patient plus `_reports/` with the reports and the run log of all patients. For NIfTI/NRRD input, the output folder contains `<name>_deFaced.nii.gz` or `<name>_deFaced.nrrd`.
@@ -269,6 +370,7 @@ File and folder names are kept, so every output can be traced back to the patien
 - A DICOM input folder is searched recursively, and *every* CT series is de-faced (previously only the largest one). Localizers/scouts are recognised by `ImageType` `LOCALIZER`, `TOPOGRAM`, `SCOUT`, `SURVEY` or `SCANOGRAM`, or by `ScanOptions` (e.g. `SURVIEW`, `SCOUT MODE`), and are not copied.
 - The written DICOM is verified; dcm2niix is no longer needed.
 - Batch mode resumes interrupted runs and writes reports; the single-patient mode refuses to write into a non-empty output folder. Outputs made by an earlier version are detected when resuming.
+- Tool version 6: target volumes inside the de-faced region keep their voxels (`--deface-targets` gives the previous output); `--clip-body`, `--mask-rtdose`, `--anatomy-check`, `--face-check`; a note for scans that were already de-faced; timing per stage (`timing_*.csv`). The fills `air`, `soft-tissue` and `constant` are unchanged: a future change of a fill gets a new name.
 - Tool version 5: the margin is given in millimetres (`--dilate-mm`, default 3 mm; before: 2 voxels); `--allow-empty-mask` accepts an empty face mask only in series without a head; QC pictures and automatic checks; icon images are removed; secondary captures, Enhanced CT, images with `BurnedInAnnotation = YES` and CT series that are no volume are not copied; DICOM files without file header are reported; a face mask that is not at the front of the head (wrong orientation in the header) fails the patient; NIfTI scaling is kept; the ROI overlap report gives the replaced volume and the share inside the face mask, uses the CT series the RTSTRUCT was drawn on, and comes with `QC_roi_overlap*.png`; exact package versions in `requirements-lock.txt`.
 
 ---

@@ -40,6 +40,11 @@ def _run(cmd: list[str], log_path: Path) -> None:
                            f"(full output: {log_path})")
 
 
+def run_task(task: str, input_nii: Path, seg_dir: Path, device: str, log_path: Path, extra: tuple = ()) -> None:
+    """Run one TotalSegmentator task; its masks are written to seg_dir."""
+    _run(["TotalSegmentator", "-i", str(input_nii), "-o", str(seg_dir), "-ta", task, *extra, "-d", device], log_path)
+
+
 def run_totalsegmentator(input_nii: Path, seg_dir: Path, device: str, log_path: Path) -> Path:
     """Segment the face; TotalSegmentator's output goes to log_path. Returns the mask path."""
     # Note: the "face" task does not support --fast (TotalSegmentator raises ValueError).
@@ -64,15 +69,17 @@ def head_volume_ml(input_nii: Path, seg_dir: Path, device: str, log_path: Path) 
 
 
 def check_empty_mask(face_ml: float, allow_empty_mask: bool, input_nii: Path, seg_dir: Path, device: str,
-                     log_path: Path, label: str) -> list[str]:
+                     log_path: Path, label: str, prior: str | None = None) -> list[str]:
     """
     An empty face mask fails the series, unless --allow-empty-mask is given AND the scan
     includes no head (skull, brain), e.g. a chest CT next to the head CT of the same patient.
-    Returns the flags for the report.
+    Returns the flags for the report. `prior`: why the scan looks already de-faced, if it does.
     """
     if face_ml > 0:
         return []
     msg = f"face mask is EMPTY for {label}: nothing was removed"
+    if prior:
+        msg += f" (the scan appears to be already de-faced: {prior})"
     if not allow_empty_mask:
         raise PatientError(msg + " (use --allow-empty-mask if the scan includes no head)")
     head_ml = head_volume_ml(input_nii, seg_dir, device, log_path)

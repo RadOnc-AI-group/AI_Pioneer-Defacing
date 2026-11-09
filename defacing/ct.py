@@ -11,6 +11,7 @@ value must be the intended fill value. Otherwise the patient fails.
 from __future__ import annotations
 
 import shutil
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -21,12 +22,16 @@ from pydicom.dataset import Dataset
 from pydicom.sequence import Sequence
 from pydicom.uid import generate_uid
 
+from . import prior as prior_defacing
+from .checks import run_optional_checks
 from .common import Options, PatientError, log, safe_cast
-from .fill import apply_fill, fill_seed
+from .fill import BODY_HU, apply_fill, fill_seed
 from .masks import Axes, applied_mask_sitk, mask_volume_ml, sitk_axes
 from .qc import automatic_checks, write_qc_picture
 from .rt import Grid, renamed
 from .segment import check_empty_mask, run_totalsegmentator
+from .targets import KeptTargets, kept_target_voxels
+from .timing import Timer
 
 
 @dataclass
@@ -44,6 +49,10 @@ class SeriesResult:
     before: np.ndarray | None = None          # input, int16 HU (for the ROI picture)
     axes: Axes | None = None
     qc_suffix: str = ""
+    keep: np.ndarray | None = None            # target voxels inside the de-faced area that stay unchanged
+    added_tissue: np.ndarray | None = None    # tissue written by the soft-tissue fill (for --clip-body)
+    targets: KeptTargets | None = None
+    checks: dict = field(default_factory=dict)  # results of the optional checks
 
 
 def _deid_method(opts: Options, fill_info: dict) -> list[str]:
@@ -51,7 +60,8 @@ def _deid_method(opts: Options, fill_info: dict) -> list[str]:
     dilation = f"{fill_info['dilate_mm']:g}mm" if fill_info.get("dilate_mm") is not None else f"{opts.dilate}vox"
     return ["De-faced: TotalSegmentator face mask",
             f"dilate={dilation} extend_anterior={'yes' if opts.extend_anterior else 'no'}",
-            f"fill={opts.fill}{seed}"]
+            f"fill={opts.fill}{seed}",
+            *(["Target voxels inside the region kept"] if fill_info.get("targets_kept_ml") else [])]
 
 
 def _mark_defaced(ds: Dataset, opts: Options, fill_info: dict) -> None:
@@ -145,33 +155,44 @@ def verify_written(in_paths: list[Path], out_paths: list[Path], image_hu: np.nda
 
 
 def deface_ct_series(files: list, label: str, out_dir: Path, qc_dir: Path, qc_suffix: str,
-                     opts: Options, tmp: Path, tool_log: Path) -> SeriesResult:
-    """De-face one CT series (list of inventory.DicomFile) into out_dir (flat)."""
-    stage = tmp / "in"
-    stage.mkdir(parents=True)
-    staged = {}                                        # staged name -> inventory.DicomFile
-    for i, f in enumerate(files):                      # copied to local disk; CT files only
-        name = f.rel.name if f.rel.name not in staged else f"{i:05d}_{f.rel.name}"
-        shutil.copy2(f.path, stage / name)
-        staged[name] = f
+                     opts: Options, tmp: Path, tool_log: Path, structs: list | None = None,
+                     timer: Timer | None = None) -> SeriesResult:
+    """De-face one CT series (list of inventory.DicomFile) into out_dir (flat). `structs`:
+    (name, dataset) of the RTSTRUCTs drawn on this series, whose targets stay unchanged."""
+    timer = timer or Timer()
+    with timer.stage("read"):
+        stage = tmp / "in"
+        stage.mkdir(parents=True)
+        staged = {}                                    # staged name -> inventory.DicomFile
+        for i, f in enumerate(files):                  # copied to local disk; CT files only
+            name = f.rel.name if f.rel.name not in staged else f"{i:05d}_{f.rel.name}"
+            shutil.copy2(f.path, stage / name)
+            staged[name] = f
 
-    reader = sitk.ImageSeriesReader()
-    series_ids = reader.GetGDCMSeriesIDs(str(stage))
-    if len(series_ids) != 1:
-        raise PatientError(f"{label}: expected one DICOM series, the reader found {len(series_ids)}")
-    file_names = list(reader.GetGDCMSeriesFileNames(str(stage), series_ids[0]))
-    if len(file_names) != len(files):
-        raise PatientError(f"{label}: the series reader uses {len(file_names)} of {len(files)} files "
-                           "(duplicate or inconsistent slices?)")
-    reader.SetFileNames(file_names)
-    image = reader.Execute()
+        reader = sitk.ImageSeriesReader()
+        series_ids = reader.GetGDCMSeriesIDs(str(stage))
+        if len(series_ids) != 1:
+            raise PatientError(f"{label}: expected one DICOM series, the reader found {len(series_ids)}")
+        file_names = list(reader.GetGDCMSeriesFileNames(str(stage), series_ids[0]))
+        if len(file_names) != len(files):
+            raise PatientError(f"{label}: the series reader uses {len(file_names)} of {len(files)} files "
+                               "(duplicate or inconsistent slices?)")
+        reader.SetFileNames(file_names)
+        image = reader.Execute()
 
-    ct_nii = tmp / "ct.nii.gz"
-    sitk.WriteImage(image, str(ct_nii))
+        ct_nii = tmp / "ct.nii.gz"
+        sitk.WriteImage(image, str(ct_nii))
+        image_hu = sitk.GetArrayFromImage(image).astype(np.float64)
+        axes = sitk_axes(image)
+        earlier = prior_defacing.evidence(image_hu, axes, ds=pydicom.dcmread(file_names[0], stop_before_pixels=True))
     seg_dir = tmp / "face_seg"
-    mask_path = run_totalsegmentator(ct_nii, seg_dir, opts.device, tool_log)
-    face_ml = mask_volume_ml(mask_path)
-    flags = check_empty_mask(face_ml, opts.allow_empty_mask, ct_nii, tmp / "head_seg", opts.device, tool_log, label)
+    with timer.stage("segment"):
+        mask_path = run_totalsegmentator(ct_nii, seg_dir, opts.device, tool_log)
+        face_ml = mask_volume_ml(mask_path)
+        flags = check_empty_mask(face_ml, opts.allow_empty_mask, ct_nii, tmp / "head_seg", opts.device, tool_log, label,
+                                 prior=earlier)
+    if earlier:
+        flags.append(f"{label}: appears to be already de-faced ({earlier}); de-faced as usual, check the QC picture")
     dilate_mm = opts.dilate_mm
     if not all(f.pixel_spacing for f in files):
         dilate_mm = None
@@ -179,15 +200,25 @@ def deface_ct_series(files: list, label: str, out_dir: Path, qc_dir: Path, qc_su
                      f"instead of {opts.dilate_mm:g} mm")
         log.warning(f"    ! {flags[-1]}")
 
-    image_hu = sitk.GetArrayFromImage(image).astype(np.float64)
-    face = applied_mask_sitk(sitk.ReadImage(str(mask_path)), image, 0, False)
-    region = applied_mask_sitk(sitk.ReadImage(str(mask_path)), image, opts.dilate, opts.extend_anterior,
-                               hu=image_hu if face_ml else None, dilate_by_mm=dilate_mm)
+    with timer.stage("mask"):
+        face = applied_mask_sitk(sitk.ReadImage(str(mask_path)), image, 0, False)
+        region = applied_mask_sitk(sitk.ReadImage(str(mask_path)), image, opts.dilate, opts.extend_anterior,
+                                   hu=image_hu if face_ml else None, dilate_by_mm=dilate_mm)
+    with timer.stage("targets"):
+        targets = (KeptTargets() if opts.deface_targets or not structs else
+                   kept_target_voxels(structs, Grid.of(image), face, region, image_hu, axes, opts, label))
+    flags += targets.flags
     new_series_uid = generate_uid()
     seed = opts.seed if opts.seed is not None else fill_seed(new_series_uid)
-    axes = sitk_axes(image)
-    target_hu, fill_info = apply_fill(image_hu, region, axes, opts.fill, seed)
+    with timer.stage("fill"):
+        target_hu, fill_info = apply_fill(image_hu, region, axes, opts.fill, seed)
     fill_info["dilate_mm"] = dilate_mm
+    # the fill sees the whole region, whatever is kept; target voxels are then simply left unchanged
+    full_region = region
+    if targets.keep is not None:
+        target_hu[targets.keep] = image_hu[targets.keep]
+        region = region & ~targets.keep
+        fill_info["targets_kept_ml"] = targets.kept_ml
 
     out_dir.mkdir(parents=True, exist_ok=True)
     sop_map: dict[str, str] = {}
@@ -195,6 +226,7 @@ def deface_ct_series(files: list, label: str, out_dir: Path, qc_dir: Path, qc_su
     frame_uid = ""
     max_slope = 1.0
     n_fitted = n_written = 0
+    write_start = time.perf_counter()
     for i, fname in enumerate(file_names):
         src = staged[Path(fname).name]
         ds = pydicom.dcmread(fname)
@@ -243,24 +275,33 @@ def deface_ct_series(files: list, label: str, out_dir: Path, qc_dir: Path, qc_su
         ds.save_as(target)
         sop_map[src.sop_uid] = ds.SOPInstanceUID
         out_paths.append(target)
+    timer.seconds["write"] = timer.seconds.get("write", 0.0) + time.perf_counter() - write_start
 
-    verify_written([Path(f) for f in file_names], out_paths, image_hu, target_hu, region, opts.fill,
-                   max_slope)
+    with timer.stage("verify"):
+        verify_written([Path(f) for f in file_names], out_paths, image_hu, target_hu, region, opts.fill,
+                       max_slope)
     if n_fitted:
         fill_info["values_fitted_to_encoding"] = n_fitted
         log.info(f"    {n_fitted} of {n_written} fill values were outside the range a slice can store and were "
                  "set to the nearest storable value")
 
-    flags += automatic_checks(mask_path, target_hu, axes.si_axis, label)
-    # QC (confidential): raw face mask, the de-faced volume as NIfTI and the QC picture
-    qc_dir.mkdir(parents=True, exist_ok=True)
-    write_qc_picture(image_hu, target_hu, region, axes, qc_dir / f"QC_defacing{qc_suffix}.png")
-    shutil.copy2(mask_path, qc_dir / f"face_mask{qc_suffix}.nii.gz")
-    defaced = sitk.GetImageFromArray(safe_cast(target_hu, np.int16))
-    defaced.CopyInformation(image)
-    sitk.WriteImage(defaced, str(qc_dir / f"CT_defaced{qc_suffix}.nii.gz"))
+    with timer.stage("qc"):
+        flags += automatic_checks(mask_path, target_hu, axes.si_axis, label)
+        # QC (confidential): raw face mask, the de-faced volume as NIfTI and the QC picture
+        qc_dir.mkdir(parents=True, exist_ok=True)
+        write_qc_picture(image_hu, target_hu, region, axes, qc_dir / f"QC_defacing{qc_suffix}.png")
+        shutil.copy2(mask_path, qc_dir / f"face_mask{qc_suffix}.nii.gz")
+        defaced = sitk.GetImageFromArray(safe_cast(target_hu, np.int16))
+        defaced.CopyInformation(image)
+        sitk.WriteImage(defaced, str(qc_dir / f"CT_defaced{qc_suffix}.nii.gz"))
+    checks, check_flags = run_optional_checks(
+        opts, image_hu, target_hu, full_region, region, axes, ct_nii, tmp, tool_log, label,
+        lambda p: applied_mask_sitk(sitk.ReadImage(str(p)), image, 0, False), timer)
+    flags += check_flags
 
+    added = region & (target_hu > BODY_HU) if opts.fill == "soft-tissue" else None
     return SeriesResult(old_series_uid=files[0].series_uid, new_series_uid=new_series_uid,
                         frame_uid=frame_uid, sop_map=sop_map, grid=Grid.of(image), region=region,
                         face_ml=face_ml, fill_info=fill_info, flags=flags, face=face,
-                        before=safe_cast(image_hu, np.int16), axes=axes, qc_suffix=qc_suffix)
+                        before=safe_cast(image_hu, np.int16), axes=axes, qc_suffix=qc_suffix,
+                        keep=targets.keep, added_tissue=added, targets=targets, checks=checks)

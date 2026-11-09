@@ -1,0 +1,10 @@
+# Optional packages of the face check (--face-check), for Python 3.10. They are added to the
+# environment of deface.py without changing any version from requirements-lock.txt:
+#   pip install -r requirements-reid.txt
+# Then, once with internet access, download the model weights:
+#   python -m defacing.reid --download
+# The packages are MIT licensed. The models keep their own terms, see README.md.
+deepface==0.0.104
+retina-face==0.0.19
+onnxruntime==1.23.2
+opencv-contrib-python-headless==5.0.0.93

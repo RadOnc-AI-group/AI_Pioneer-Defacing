@@ -38,6 +38,7 @@ Writes no image data. Check the log and `/data/defaced_qc/_reports/`:
 - the number of patients and CT series found (`--depth 2` if patients are grouped in sub-folders);
 - files that are not copied, and why (localizers, MR, RTDOSE, screenshots, files without DICOM header, ...);
 - contours that would be removed, and **kept contours whose names suggest the skin, a mask or a bolus**: remove those that follow the face with `--remove-roi NAME`;
+- **the target volumes that are kept, and names that look like targets but are not**: fix them with `--keep-roi NAME` and `--not-target NAME`;
 - the identifying tags (`identifying_tags_*.csv` is confidential).
 
 ## 5. Run, then check
@@ -46,10 +47,11 @@ Writes no image data. Check the log and `/data/defaced_qc/_reports/`:
 python deface.py --batch /data/patients -o /data/defaced
 ```
 
-An interrupted run can simply be started again. Afterwards:
+An interrupted run can simply be started again. `--anatomy-check` and `--face-check` add automatic checks ([README](README.md#anatomy-check); the face check needs `pip install -r requirements-reid.txt` and, once with internet access, `python -m defacing.reid --download`). Try them on a few cases first: their thresholds are not yet calibrated on real scans. Afterwards:
 - every `FAILED` patient: see [Troubleshooting](README.md#troubleshooting);
 - every `CHECK` line in the summary (see [QC picture and automatic checks](README.md#qc-picture-and-automatic-checks));
 - **look at all `QC_defacing*.png`** in `/data/defaced_qc/` (an image viewer that shows a folder of pictures is enough), and for a few patients at a 3D volume rendering of the de-faced DICOM;
+- `target_exposed_cm2` in `patients_*.csv` shows where kept target volumes leave the skin visible;
 - `QC_roi_overlap*.png` and `roi_overlap*.csv` show which contours lost image content (e.g. eyes, lenses, lips): useful when selecting data for training or evaluation.
 
 ## 6. De-identify and share

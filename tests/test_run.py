@@ -78,7 +78,7 @@ def test_run_single_dicom(cohort, tmp_path, fake_ts, ts_on_path):
     assert (out / "dcm").is_dir() and (out / "rt").is_dir()
     reports = {p.name.rsplit("_", 2)[0] if p.name[-19:-4].replace("_", "").isdigit() else p.name
                for p in qc.glob("*.csv")}
-    assert reports == {"patients", "identifying_tags", "roi_overlap", "roi_overlap.csv"}
+    assert reports == {"patients", "identifying_tags", "roi_overlap", "roi_overlap.csv", "timing"}
     rows = list(csv.DictReader(open(next(qc.glob("patients_*.csv")), encoding="utf-8")))
     assert rows[0]["status"] == "done" and "PatientName" in rows[0]["identifying_tags_populated"]
 
