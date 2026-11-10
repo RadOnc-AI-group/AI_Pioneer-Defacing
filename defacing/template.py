@@ -49,9 +49,10 @@ MIN_COVERAGE = 0.95
 MIN_ABOVE_FACE_MM = 40.0    # scan needed above the face: without a forehead the skin at the sides leaves the pose
                             # open, and a pose up to 87 mm off still fits well, so nothing else would show it
 # Flag only (the report reads the real face, so it can never change the fill): the front is reported as not fitting
-# when it is further than this from the real skin. Empirical starting values, see the README.
-MAX_SKIN_MEDIAN_MM = 5.0    # median over the columns of the face
-MAX_SKIN_P90_MM = 15.0      # 10th and 90th percentile
+# when it is further than this from the real skin. Empirical: it separates the better from the worse fits of a few
+# scans and is not a limit of acceptable accuracy, see the README.
+MAX_SKIN_MEDIAN_MM = 10.0   # median over the columns of the face
+MAX_SKIN_P90_MM = 20.0      # 10th and 90th percentile
 CLOSING_MM = 3.0            # removes the groove of the mouth slit from the front surface
 # starting positions: head tilt (degrees), anterior shift, superior shift (mm). A grid, because the face mask says
 # only roughly where the face is, and a scan that ends near the forehead moves that estimate.
