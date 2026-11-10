@@ -2,6 +2,7 @@
 import csv
 import json
 import re
+import runpy
 import subprocess
 import sys
 from pathlib import Path
@@ -196,6 +197,25 @@ def test_oars_stay_in_masked_rtdose(tmp_path, fake_ts):
                                Options(seed=1, keep_oar=True, keep_oar_depth_mm=0.0, mask_rtdose=True))
     assert res.status == "done", res.error
     assert res.rtdose_masked == 1 and res.oar_kept_ml[0] > 0
+
+
+def test_fill_shortcut_sets_soft_tissue_and_keep_oar(tmp_path, monkeypatch):
+    repo = Path(__file__).resolve().parent.parent
+    main = runpy.run_path(str(repo / "deface.py"), run_name="not_main")["main"]
+    seen = {}
+    main.__globals__["run_single"] = lambda i, o, q, opts, dry: seen.update(opts=opts) or 0
+    monkeypatch.setattr(sys, "argv", ["deface.py", "-i", str(tmp_path), "-o", str(tmp_path / "o"),
+                                      "--fill", "soft-tissue-keep-oar", "--keep-oar-depth-mm", "7"])
+    assert main() == 0
+    opts = seen["opts"]
+    assert opts.fill == "soft-tissue" and opts.keep_oar and not opts.keep_oar_ts and opts.keep_oar_depth_mm == 7
+
+
+def test_fill_shortcut_needs_the_anterior_extension(tmp_path):
+    repo = Path(__file__).resolve().parent.parent
+    p = subprocess.run([sys.executable, str(repo / "deface.py"), "-i", str(tmp_path), "-o", str(tmp_path / "o"),
+                        "--fill", "soft-tissue-keep-oar", "--no-extend-anterior"], capture_output=True, text=True)
+    assert p.returncode == 2 and "no-extend-anterior" in p.stderr
 
 
 def fake_seg(calls):

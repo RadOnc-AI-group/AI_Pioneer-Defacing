@@ -31,6 +31,7 @@ from .qc import automatic_checks, write_qc_picture
 from .rt import Grid, renamed
 from .segment import check_empty_mask, run_totalsegmentator
 from .oars import keep_oars
+from .template import SYNTHETIC_NOTE, prepare_fill
 from .targets import KeptTargets, kept_target_voxels
 from .timing import Timer
 
@@ -62,7 +63,8 @@ def _deid_method(opts: Options, fill_info: dict) -> list[str]:
     dilation = f"{fill_info['dilate_mm']:g}mm" if fill_info.get("dilate_mm") is not None else f"{opts.dilate}vox"
     return ["De-faced: TotalSegmentator face mask",
             f"dilate={dilation} extend_anterior={'yes' if opts.extend_anterior else 'no'}",
-            f"fill={opts.fill}{seed}",
+            f"fill={fill_info.get('fill', opts.fill)}{seed}",
+            *([SYNTHETIC_NOTE] if fill_info.get("fill") == "template" else []),
             *(["Target voxels inside the region kept"] if fill_info.get("targets_kept_ml") else []),
             *(["Organ at risk voxels below the skin inside the region kept"] if fill_info.get("oars_kept_ml") else [])]
 
@@ -221,12 +223,19 @@ def deface_ct_series(files: list, label: str, out_dir: Path, qc_dir: Path, qc_su
     new_series_uid = generate_uid()
     seed = opts.seed if opts.seed is not None else fill_seed(new_series_uid)
     with timer.stage("fill"):
-        target_hu, fill_info = apply_fill(image_hu, region, axes, opts.fill, seed)
+        fill_mode, template, template_flags, template_info = prepare_fill(opts, image_hu, face, region, axes, label)
+        target_hu, fill_info = apply_fill(image_hu, region, axes, fill_mode, seed, template=template)
+    fill_info.update(template_info)
+    flags += template_flags
     fill_info["dilate_mm"] = dilate_mm
     # the fill sees the whole region, whatever is kept; target and OAR voxels are then simply left unchanged
     full_region = region
     keep = targets.keep if oars.keep is None else (oars.keep if targets.keep is None else targets.keep | oars.keep)
     if keep is not None:
+        through = keep & (target_hu <= BODY_HU) & (image_hu > BODY_HU)
+        if template is not None and through.any():
+            flags.append(f"{label}: {float(through.sum()) * float(np.prod(axes.spacing)) / 1000.0:.1f} ml of kept voxels lie in front "
+                         "of the synthetic face and show through it; check the QC picture")
         target_hu[keep] = image_hu[keep]
         region = region & ~keep
     if targets.keep is not None:
@@ -303,7 +312,7 @@ def deface_ct_series(files: list, label: str, out_dir: Path, qc_dir: Path, qc_su
         flags += automatic_checks(mask_path, target_hu, axes.si_axis, label)
         # QC (confidential): raw face mask, the de-faced volume as NIfTI and the QC picture
         qc_dir.mkdir(parents=True, exist_ok=True)
-        write_qc_picture(image_hu, target_hu, region, axes, qc_dir / f"QC_defacing{qc_suffix}.png")
+        write_qc_picture(image_hu, target_hu, region, axes, qc_dir / f"QC_defacing{qc_suffix}.png", template)
         shutil.copy2(mask_path, qc_dir / f"face_mask{qc_suffix}.nii.gz")
         defaced = sitk.GetImageFromArray(safe_cast(target_hu, np.int16))
         defaced.CopyInformation(image)
@@ -312,7 +321,7 @@ def deface_ct_series(files: list, label: str, out_dir: Path, qc_dir: Path, qc_su
         opts, image_hu, target_hu, full_region, region, axes, ct_nii, tmp, tool_log, label, load_mask, timer)
     flags += check_flags
 
-    added = region & (target_hu > BODY_HU) if opts.fill == "soft-tissue" else None
+    added = region & (target_hu > BODY_HU) if fill_info.get("fill") in ("soft-tissue", "template") else None
     return SeriesResult(old_series_uid=files[0].series_uid, new_series_uid=new_series_uid,
                         frame_uid=frame_uid, sop_map=sop_map, grid=Grid.of(image), region=region,
                         face_ml=face_ml, fill_info=fill_info, flags=flags, face=face,

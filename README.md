@@ -150,8 +150,10 @@ The removed contours are saved in the QC folder as a separate RTSTRUCT that refe
 | `--dilate-mm MM` | `3` | Expands the face mask by MM millimetres in all directions (every voxel whose centre lies within MM of the mask; with slices thicker than MM there is no margin across slices) |
 | `--dilate N` | `2` | The margin in voxels, used only for images whose voxel size is unknown (DICOM without `PixelSpacing`, NIfTI without orientation and with 1 mm voxels, NRRD without `space`); reported as a warning |
 | `--no-extend-anterior` | off (extension on) | Removes only the dilated face mask, not everything in front of it (see below) |
-| `--fill air` / `soft-tissue` / `constant` | `air` | Value of the de-faced voxels (see below) |
-| `--seed N` | from the new Series UID | Random seed of the `air` and `soft-tissue` fills |
+| `--fill air` / `soft-tissue` / `constant` / `soft-tissue-keep-oar` / `template` | `air` | Value of the de-faced voxels (see below). `soft-tissue-keep-oar` is a shortcut for `--fill soft-tissue --keep-oar`; `template` is experimental ([Template fill](#template-fill-experimental)) |
+| `--template-model PATH` | `$DEFACE_TEMPLATE`, else bundled | The template of `--fill template` |
+| `--fallback none` / `soft-tissue` / `fail` | `none` | What a template fit below the quality limits does: insert it and flag the case, use `soft-tissue` instead, or fail the patient |
+| `--seed N` | from the new Series UID | Random seed of the `air`, `soft-tissue` and `template` fills |
 | `--keep-body`, `--keep-skin` | off | Keep the Body/External or Skin/Haut contours |
 | `--keep-rtdose`, `--keep-rtplan` | off | Copy RTDOSE, or RTPLAN and RTRECORD files |
 | `--remove-roi REGEX` | | Also remove ROIs whose whole name matches (case-insensitive, repeatable) |
@@ -189,11 +191,12 @@ Before extending, the tool checks that the face mask lies at the front of the he
 
 - **`air`** (default): air sampled from the same scan. Noise with the in-plane texture (noise power spectrum) of the scan's air is mapped onto the scan's own distribution of air values, including any clipping (e.g. at −1024 HU). The air is measured outside the body, within 5 cm of the de-faced slices (or in the whole scan, if there is too little air there).
 - **`soft-tissue`**: meant to reduce the difference between de-faced training data and clinical CTs (which still show a face) for segmentation models. In every axial slice, the convex hull of the head that remains after de-facing forms a smooth new front of the head without nose, lips or eyes. De-faced voxels inside the hull get soft tissue (median HU of the nearby soft tissue, with the noise level and texture of the scan, and a 2 mm skin layer); voxels outside the hull get air as above. Cannot be combined with `--no-extend-anterior` (concave parts of the face, e.g. around the eyes, would otherwise leave a face-shaped tissue/air boundary inside the hull).
+- **`template`** (experimental): a synthetic mean face instead of the smooth front of `soft-tissue`, see [Template fill](#template-fill-experimental).
 - **`constant`**: −1000 HU everywhere in the region (the behaviour of earlier versions). **Not recommended for shared data:** real air is noisy, so selecting the voxels that are exactly −1000 HU shows the outline of the de-faced region, i.e. the shape of the face mask including the nose; filling that selection with tissue values makes the face profile visible again.
 
-For `air` and `soft-tissue`, everything the fill uses is measured *outside* the de-faced region, plus a random seed, so the fill cannot add information about the face, and the de-faced region cannot be found by selecting a value. Voxels outside the reconstructed field of view (padding below −1100 HU, e.g. −3024 HU) keep their value. The seed and the measured values are recorded in the manifest, and the seed also in the DICOM header (`DeidentificationMethod`), so the result is reproducible.
+For `air`, `soft-tissue` and `template`, everything the fill uses is measured *outside* the de-faced region, plus a random seed, so the fill cannot add information about the face, and the de-faced region cannot be found by selecting a value. Voxels outside the reconstructed field of view (padding below −1100 HU, e.g. −3024 HU) keep their value. The seed and the measured values are recorded in the manifest, and the seed also in the DICOM header (`DeidentificationMethod`), so the result is reproducible.
 
-Image content of structures inside the de-faced region (e.g. lips, eyes, lenses) is replaced by every fill. Use the [ROI overlap report](#roi-overlap-report) to exclude those structures from training or evaluation.
+Image content of structures inside the de-faced region (e.g. lips, eyes, lenses) is replaced by every fill, unless it is kept as a target or restored with [`--keep-oar`](#organs-at-risk). Use the [ROI overlap report](#roi-overlap-report) to exclude those structures from training or evaluation.
 
 ### Verification of the written DICOM
 
@@ -252,17 +255,37 @@ A ROI counts as a target by its `RTROIInterpretedType` (`PTV`, `CTV`, `GTV`) or 
 
 Not kept, and reported, are helper structures and anything that may follow the skin: names with a helper prefix (`z_PTV`, `x_CTV`), `ring`, `opt`, `avoid`, `NonPTV`, `Hilfs...`, expansions and subtractions (`PTV+5mm`, `PTV70-PTV60`), and every name that is Body, Skin or unclear ([Body and Skin contours](#body-and-skin-contours)), such as `Body-PTV` or `PTV-Haut`. Bare `Boost`, `Tumorbett`, `LK` and `Lymphknoten` are not targets either. Check the dry run: it lists kept and rejected names. A rejected ROI that lies in the de-faced region is replaced there and raises a CHECK with its volume. Use `--keep-roi` and `--not-target` for the names of your site.
 
-| Share of the face mask a target covers | Result |
+| Share of the tissue in the face mask a target covers | Result |
 |---|---|
 | less than 25% | kept |
 | 25% to less than 75% | kept, and reported with a CHECK line |
 | 75% or more | **not kept** (probably not a true target), reported; `--keep-roi` keeps it |
 
+The share is taken of the tissue because most of a face mask is air.
+
 **Where a target reaches the skin, that part of the surface stays visible** in a 3D rendering. `target_exposed_cm2` in `patients_*.csv` gives the area seen from the front where kept tissue has at most 5 mm of tissue in front of it, and a CHECK line is shown above 5 cm². `is_target` and `ml_kept_in_region` in the [ROI overlap report](#roi-overlap-report) show what was kept. `--deface-targets` gives the output of tool version 5 (no voxels kept).
+
+### Template fill (experimental)
+
+`--fill template` replaces the region with the mean head surface of **FLAME 2023 Open**, a synthetic face that belongs to no patient. It is experimental: **validate it before any export**, against `soft-tissue`, for lymph node and OAR Dice and for re-identification on a cohort with planning and replanning CT pairs. The face is synthetic, and the DICOM `DeidentificationMethod`, the NIfTI `descrip` field, an NRRD key and the manifest say so. The bundled `defacing/data/flame_template.npz` is derived from FLAME 2023 Open (CC-BY-4.0 with additional terms of its authors, which do not allow fake or misleading content); see the NOTICE file next to it, and cite the FLAME paper when reporting results.
+
+Only the mean shape with a neutral expression is used. Scale, rotation and position come from the skin outside the region, and no HU value inside the region is used. Behind the new front there is only tissue and the 2 mm skin layer, no internal anatomy. A 10 mm ramp from the outline of the region blends it into the `soft-tissue` front.
+
+**The template is always inserted, so that every case can be compared across fills.** A fit below the quality limits raises a CHECK line and `template_quality` in `patients_*.csv` says why; `--fallback soft-tissue` uses `soft-tissue` for those cases, and `--fallback fail` fails them. Only a case with no pose at all (for example unknown orientation or too little skin) fails without `--fallback soft-tissue`, because the template cannot be placed. The limits are: at least 40 mm of scan above the face, a head within 10% of the template's size and turned at most 25°, a skin fit of at most 4 mm RMS, starting positions that agree within 5 mm, and at least 95% coverage of the face. Those checks use only voxels outside the region. The case is also flagged when the template front is more than 5 mm from the real skin at the median or more than 15 mm at the 10th or 90th percentile: this compares it with the real face, so it is only reported and never influences the fill, and `--fallback` ignores it. These are empirical starting values.
+
+`tools/make_flame_template.py` makes such a file from a FLAME 2023 Open download. Use only the Open release: the other FLAME versions are non-commercial and may not be redistributed. `fill` in `patients_*.csv` is the fill requested and `fill_used` the fill applied.
+
+Limitations:
+- **An accepted fit is not proof of a correct one.** A wrong pose can fit the skin around the face well. `tools/template_fit_report.py` compares the front with the real skin on your scans (for validation only): run it first.
+- Metal streaks and the edge of a thermoplastic mask stop at the template.
+- The template has closed lips, which will not match a bite block.
+- Contours of lips and eyes will not match the synthetic face. `--keep-oar` cannot be combined with this fill, and kept target voxels in front of the synthetic face raise a CHECK line.
+- All patients share one face, which a model may use as a shortcut. The nose and mouth are solid tissue.
+- With `--face-check`, a face is expected in nearly every case, so "face found" is not a finding (`--face-check-fail any` is refused). A mean face may resemble many people, so a "match" needs a baseline against other patients: only the similarity to the patient's own original compared with that baseline means anything.
 
 ### Organs at risk
 
-`--keep-oar` restores the voxels of organs at risk inside the de-faced region, so that contours such as mandible and eyes still describe the image. It is off by default because it puts anatomy back into the face region. The rest of the region is filled as usual, so restored organs can stand in air, and dose recalculation at the front of the head stays unreliable.
+`--keep-oar` (or the shortcut `--fill soft-tissue-keep-oar`) restores the voxels of organs at risk inside the de-faced region, so that contours such as mandible and eyes still describe the image. It is off by default because it puts anatomy back into the face region. The rest of the region is filled as usual, so restored organs can stand in air, and dose recalculation at the front of the head stays unreliable.
 
 **Which ROIs.** Every ROI with `RTROIInterpretedType` `ORGAN`, except targets, Body/Skin/unclear names, helpers and planning risk volumes (`z_...`, `Ring`, `opt`, `PRV`, `+5mm`, `-PTV`) and teeth (dental features identify a person). A site that leaves this field empty gets no OARs, and a CHECK line says so. `--not-oar` excludes names; `--keep-roi` keeps a whole ROI with no depth limit.
 
@@ -318,7 +341,7 @@ A CT whose header records de-facing (`DeidentificationMethod`, `ImageComments`, 
 
 ### Timing report
 
-`timing_*.csv` in the QC folder gives, per patient, the device, the machine and the seconds of each stage (`read`, `segment`, `mask`, `targets`, `fill`, `write`, `verify`, `qc`, `rt_copy`, and the optional checks). The final summary gives the median and interquartile range per stage and device. The optional checks are separate columns, so that the time of the pipeline itself can be reported without them.
+`timing_*.csv` in the QC folder gives, per patient, the device, the machine and the seconds of each stage (`read`, `segment`, `mask`, `targets`, `keep_oar`, `fill`, `write`, `verify`, `qc`, `rt_copy`, and the optional checks). The final summary gives the median and interquartile range per stage and device. The optional checks are separate columns, so that the time of the pipeline itself can be reported without them.
 
 ### Residual risks and evidence
 
@@ -388,6 +411,8 @@ File and folder names are kept, so every output can be traced back to the patien
 - A DICOM input folder is searched recursively, and *every* CT series is de-faced (previously only the largest one). Localizers/scouts are recognised by `ImageType` `LOCALIZER`, `TOPOGRAM`, `SCOUT`, `SURVEY` or `SCANOGRAM`, or by `ScanOptions` (e.g. `SURVIEW`, `SCOUT MODE`), and are not copied.
 - The written DICOM is verified; dcm2niix is no longer needed.
 - Batch mode resumes interrupted runs and writes reports; the single-patient mode refuses to write into a non-empty output folder. Outputs made by an earlier version are detected when resuming.
+- `--fill template` (experimental, not a change of existing fills).
+- Tool version 7: the size limits of target volumes (25%, 75%) are measured against the tissue in the face mask instead of the whole mask; `--keep-oar`, `--keep-oar-ts`, `--not-oar`, `--keep-oar-depth-mm`, `--fill soft-tissue-keep-oar`.
 - Tool version 6: target volumes inside the de-faced region keep their voxels (`--deface-targets` gives the previous output); `--clip-body`, `--mask-rtdose`, `--anatomy-check`, `--face-check`; a note for scans that were already de-faced; timing per stage (`timing_*.csv`). The fills `air`, `soft-tissue` and `constant` are unchanged: a future change of a fill gets a new name.
 - Tool version 5: the margin is given in millimetres (`--dilate-mm`, default 3 mm; before: 2 voxels); `--allow-empty-mask` accepts an empty face mask only in series without a head; QC pictures and automatic checks; icon images are removed; secondary captures, Enhanced CT, images with `BurnedInAnnotation = YES` and CT series that are no volume are not copied; DICOM files without file header are reported; a face mask that is not at the front of the head (wrong orientation in the header) fails the patient; NIfTI scaling is kept; the ROI overlap report gives the replaced volume and the share inside the face mask, uses the CT series the RTSTRUCT was drawn on, and comes with `QC_roi_overlap*.png`; exact package versions in `requirements-lock.txt`.
 

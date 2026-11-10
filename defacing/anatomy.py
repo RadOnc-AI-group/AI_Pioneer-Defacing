@@ -5,7 +5,8 @@ mask does not depend on. The external nose lies in front of the nasal cavity, th
 front of the teeth, the eyelids in front of the lenses, the chin in front of the mandible.
 
 The check catches a partial face mask, which the other checks cannot: unchanged tissue in
-front of a landmark means the mask missed what lies there. It also reports brain inside the
+front of a landmark means the mask missed what lies there. Only the front FRONT_MM of a landmark counts: tissue in front of
+its rear part (maxilla, cheek) is meant to stay. It also reports brain inside the
 de-faced region (over-removal) and a face that is not in front of the brain (orientation).
 
 It only adds CHECK lines. The thresholds are starting values and should be calibrated on

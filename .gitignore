@@ -18,3 +18,11 @@ results/
 # OS
 .DS_Store
 Thumbs.db
+
+# Confidential notes, patient-derived material and third-party model downloads: never commit
+confidential*
+**/memory/
+MEMORY.md
+*private*.json
+*.pkl
+FLAME2023*.zip

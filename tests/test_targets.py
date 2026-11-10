@@ -60,6 +60,22 @@ def test_a_helper_in_the_region_is_replaced_and_reported(monkeypatch):
     assert "'z_PTV' (0.1 ml)" in kept.flags[0] and "Ring_PTV" not in kept.flags[0]
 
 
+def test_the_size_limit_is_taken_of_the_tissue_in_the_face_mask(monkeypatch):
+    """A contour of the whole face covers little of a face mask that is mostly air, but all of its tissue."""
+    import defacing.targets as targets
+    hu = np.full((4, 40, 10), -1000.0)
+    hu[:, 30:, :] = 40.0
+    face = np.ones_like(hu, bool)                                   # three quarters air
+    contour = np.zeros((40, 10), bool)
+    contour[30:, :] = True
+    monkeypatch.setattr(targets, "roi_table", lambda ds: {1: ("PTV_all", "PTV")})
+    monkeypatch.setattr(targets, "roi_slices", lambda ds, grid: [(1, {z: contour for z in range(4)})])
+    grid = type("G", (), {"spacing": (2.0, 2.0, 2.0)})()
+    out = targets.kept_target_voxels([("rs", object())], grid, face, face, hu, Axes((2.0, 2.0, 2.0), (1, False), 0),
+                                     Options(), "CT")
+    assert out.keep is None and out.rows[0]["pct_of_face_tissue"] == 100.0 and "NOT kept" in out.flags[0]
+
+
 def test_german_umlauts_are_normalised():
     assert classify_target("PLANUNGSZIELVOLUMEN", "") == "target"
     assert classify_target("Körper-PTV", "") == "rejected"
@@ -160,7 +176,7 @@ def test_keep_roi_overrules_the_size_guard(tmp_path, fake_ts):
 
 def test_medium_target_is_kept_and_reported(tmp_path, fake_ts):
     res, ct, out, _ = run(tmp_path, [("PTV_half", "PTV")])
-    assert 25 <= res.targets[0]["pct_of_face_mask"] < 75 and res.targets[0]["kept"]
+    assert 25 <= res.targets[0]["pct_of_face_tissue"] < 75 and res.targets[0]["kept"]
     assert any("kept, so much of the face" in f for f in res.flags)
 
 

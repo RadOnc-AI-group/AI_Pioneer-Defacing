@@ -51,7 +51,8 @@ An interrupted run can simply be started again. `--anatomy-check` and `--face-ch
 - every `FAILED` patient: see [Troubleshooting](README.md#troubleshooting);
 - every `CHECK` line in the summary (see [QC picture and automatic checks](README.md#qc-picture-and-automatic-checks));
 - **look at all `QC_defacing*.png`** in `/data/defaced_qc/` (an image viewer that shows a folder of pictures is enough), and for a few patients at a 3D volume rendering of the de-faced DICOM;
-- `target_exposed_cm2` in `patients_*.csv` shows where kept target volumes leave the skin visible;
+- `target_exposed_cm2` in `patients_*.csv` shows where kept target volumes leave the skin visible, and `oar_kept_ml` / `oar_exposed_cm2` the same for organs at risk restored with `--keep-oar`;
+- `template_quality` and `fill_used` in `patients_*.csv` show which patients of an experimental `--fill template` run have a fit below the limits or used `soft-tissue` through `--fallback`;
 - `QC_roi_overlap*.png` and `roi_overlap*.csv` show which contours lost image content (e.g. eyes, lenses, lips): useful when selecting data for training or evaluation.
 
 ## 6. De-identify and share

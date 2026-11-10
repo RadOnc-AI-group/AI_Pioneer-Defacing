@@ -71,6 +71,13 @@ def plan_oars(rois: dict[int, tuple[str, str]], opts: Options) -> OarPlan:
     return plan
 
 
+def thin_free_disk(spacing: tuple[float, float]) -> np.ndarray:
+    """In-plane structuring element: a binary opening with it removes sheets thinner than 2 * THIN_MM."""
+    ry, rx = int(THIN_MM / spacing[0]), int(THIN_MM / spacing[1])
+    y, x = np.ogrid[-ry:ry + 1, -rx:rx + 1]
+    return (y * spacing[0]) ** 2 + (x * spacing[1]) ** 2 <= THIN_MM ** 2
+
+
 def below_skin(hu: np.ndarray, voxels: np.ndarray, axes: Axes, depth_mm: float) -> np.ndarray:
     """
     The part of `voxels` at least depth_mm from the outside of the patient. Air inside the
@@ -86,9 +93,7 @@ def below_skin(hu: np.ndarray, voxels: np.ndarray, axes: Axes, depth_mm: float) 
     where = np.nonzero(wanted)
     lo = [max(0, int(c.min()) - r) for c, r in zip(where, reach)]
     hi = [min(n, int(c.max()) + r + 1) for c, r, n in zip(where, reach, wanted.shape)]
-    ry, rx = [int(THIN_MM / s) for s in spacing[1:]]
-    y, x = np.ogrid[-ry:ry + 1, -rx:rx + 1]
-    disk = (y * spacing[1]) ** 2 + (x * spacing[2]) ** 2 <= THIN_MM ** 2
+    disk = thin_free_disk((spacing[1], spacing[2]))
     body = np.zeros((hi[0] - lo[0], *wanted.shape[1:]), bool)
     for k in range(lo[0], hi[0]):
         body[k - lo[0]] = ndi.binary_fill_holes(ndi.binary_opening(tissue[k], structure=disk))

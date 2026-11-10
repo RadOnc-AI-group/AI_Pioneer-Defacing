@@ -89,8 +89,25 @@ def _grid(rows: list[list[np.ndarray]], gap: int = 4) -> np.ndarray:
     return out
 
 
-def write_qc_picture(before: np.ndarray, after: np.ndarray, region: np.ndarray, axes: Axes, path: Path) -> bool:
-    """Write the QC picture (see module docstring); False if the orientation is unclear."""
+def _draw_template(side: np.ndarray, front_view: np.ndarray, front: np.ndarray, weight: np.ndarray, spacing: tuple,
+                   n_ap: int) -> None:
+    """Into the panels of the de-faced image: the template front on the side view and the blend band on the front view."""
+    s_si, s_ap, s_lr = spacing
+    mid = int(np.nanargmax(np.nansum(np.isfinite(front), axis=0))) if np.isfinite(front).any() else front.shape[1] // 2
+    for k, value in enumerate(front[:, mid]):
+        if np.isfinite(value):
+            y, x = int((len(front) - 1 - k) * s_si / PIXEL_MM), int(((n_ap - 1) * s_ap - value) / PIXEL_MM)
+            if 0 <= y < side.shape[0] and 0 <= x < side.shape[1]:
+                side[y, x] = 1.0
+    band = _to_mm(((weight > 0.0) & (weight < 1.0)).astype(np.float32), (s_si, s_lr))[::-1] > 0.5
+    h, w = min(band.shape[0], front_view.shape[0]), min(band.shape[1], front_view.shape[1])
+    front_view[:h, :w][band[:h, :w]] = 0.5 * front_view[:h, :w][band[:h, :w]] + 0.5
+
+
+def write_qc_picture(before: np.ndarray, after: np.ndarray, region: np.ndarray, axes: Axes, path: Path,
+                     template=None) -> bool:
+    """Write the QC picture (see module docstring); False if the orientation is unclear. With a
+    TemplateFront, the second row also shows where the template lies and the band where it is blended."""
     import SimpleITK as sitk
     oriented = [_oriented(v, axes) for v in (before, after, region)]
     if any(o is None for o in oriented):
@@ -100,8 +117,14 @@ def write_qc_picture(before: np.ndarray, after: np.ndarray, region: np.ndarray, 
     if zs.size:                                                 # head-feet range around the region
         margin = int(np.ceil(MARGIN_MM / spacing[0]))
         crop = slice(max(0, zs[0] - margin), min(len(b), zs[-1] + margin + 1))
-        b, a = b[crop], a[crop]
+        b, a, r = b[crop], a[crop], r[crop]
+    else:
+        crop = slice(None)
     rows = [list(_views(v > SKIN_HU, spacing)) for v in (b, a)]
+    if template is not None:
+        from .fill import blend_weight
+        _draw_template(rows[1][0], rows[1][1], template.front[crop], blend_weight(r.any(axis=1), (spacing[0], spacing[2])),
+                       spacing, a.shape[1])
     picture = (_grid(rows) * 255).round().astype(np.uint8)
     path.parent.mkdir(parents=True, exist_ok=True)
     sitk.WriteImage(sitk.GetImageFromArray(picture), str(path))

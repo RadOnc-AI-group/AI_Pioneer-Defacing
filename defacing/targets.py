@@ -8,8 +8,8 @@ must START with a target word (German terms included). Optimisation and helper s
 Body, Skin or unclear ("Body-PTV") are not targets: keeping one of those could preserve
 much of the face. Their names are reported, and --keep-roi can overrule the decision.
 
-A ROI that covers a large part of the face mask is probably mislabelled, see
-TOO_LARGE_SHARE and LARGE_SHARE.
+A ROI that covers a large part of the tissue in the face mask is probably mislabelled, see
+TOO_LARGE_SHARE and LARGE_SHARE. (Most of a face mask is air, so the share is taken of the tissue.)
 """
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ from .common import Options
 from .masks import BODY_HU, Axes
 from .rt import Grid, classify_roi, normalise, plan_roi_removal, roi_slices, roi_table
 
-TOO_LARGE_SHARE = 0.75      # a target covering this share of the face mask or more is NOT kept (reported)
+TOO_LARGE_SHARE = 0.75      # a target covering this share of the face-mask tissue or more is NOT kept (reported)
 LARGE_SHARE = 0.25          # ... this share or more is kept, and reported
 SKIN_DEPTH_MM = 5.0         # kept tissue with at most this much tissue in front of it lies at the skin
 EXPOSED_CHECK_CM2 = 5.0     # a kept skin area (seen from the front) above this is reported
@@ -121,8 +121,9 @@ def kept_target_voxels(structs: list[tuple[str, object]], grid: Grid, face: np.n
     """The voxels of `region` inside the targets of the structure sets drawn on this CT series.
     `face` is the face mask itself on the grid (no margin, no extension)."""
     out = KeptTargets()
-    face_voxels = int(face.sum())
-    if not region.any() or not face_voxels:
+    face_tissue = face & (hu > BODY_HU)
+    face_voxels = max(int(face_tissue.sum()), 1)
+    if not region.any() or not face.any():
         return out
     voxel_ml = float(np.prod(grid.spacing)) / 1000.0
     keep = np.zeros_like(region)
@@ -143,9 +144,9 @@ def kept_target_voxels(structs: list[tuple[str, object]], grid: Grid, face: np.n
             inside = sum(int((m & region[z]).sum()) for z, m in slices.items())
             if not inside:
                 continue
-            share = sum(int((m & face[z]).sum()) for z, m in slices.items()) / face_voxels
+            share = sum(int((m & face_tissue[z]).sum()) for z, m in slices.items()) / face_voxels
             kept = share < TOO_LARGE_SHARE or number in plan.forced
-            what = f"{label}: target {name!r} covers {100 * share:.0f}% of the face mask"
+            what = f"{label}: target {name!r} covers {100 * share:.0f}% of the tissue in the face mask"
             if not kept:
                 out.flags.append(f"{what}: NOT kept, probably not a true target (keep it with --keep-roi NAME if "
                                  "it is one)")
@@ -155,7 +156,7 @@ def kept_target_voxels(structs: list[tuple[str, object]], grid: Grid, face: np.n
                 for z, m in slices.items():
                     keep[z] |= m & region[z]
             out.rows.append({"rtstruct": rs_name, "roi": name, "ml_in_region": round(inside * voxel_ml, 2),
-                             "pct_of_face_mask": round(100 * share, 1), "kept": kept})
+                             "pct_of_face_tissue": round(100 * share, 1), "kept": kept})
         if replaced:
             out.flags.append(f"{label}: ROI(s) that look like targets but count as helpers are replaced in the de-faced "
                              f"region: {', '.join(replaced)} (if one is a true target: --keep-roi NAME)")

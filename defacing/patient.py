@@ -46,11 +46,12 @@ from .rt import (RegionStats, clip_roi, plan_roi_removal, referenced_series, rem
 from .rtdose import mask_dose, verify_dose
 from .oars import keep_oars, plan_oars
 from .segment import check_empty_mask, run_totalsegmentator
+from .template import SYNTHETIC_NOTE, prepare_fill
 from .targets import KeptTargets, classify_target, plan_targets
 from .timing import Timer, machine_info
 
 PARTIAL_SUFFIX = ".partial"
-SCRIPT_VERSION = 6          # stored in the manifest; bump when the output content changes
+SCRIPT_VERSION = 7          # stored in the manifest; bump when the output content changes
 
 
 @dataclass
@@ -608,9 +609,9 @@ def _dilation(opts: Options, voxel_size_known: bool) -> tuple[float | None, list
 
 
 def _finish(data: np.ndarray, out: np.ndarray, region: np.ndarray, axes, qc_dir: Path, info: dict,
-            dilate_mm: float | None) -> None:
+            dilate_mm: float | None, template=None) -> None:
     info["dilate_mm"] = dilate_mm
-    write_qc_picture(data, out, region, axes, qc_dir / "QC_defacing.png")
+    write_qc_picture(data, out, region, axes, qc_dir / "QC_defacing.png", template)
 
 
 def _deface_nifti(image_path: Path, mask_path: Path, out_path: Path, opts: Options, seed: int,
@@ -636,7 +637,11 @@ def _deface_nifti(image_path: Path, mask_path: Path, out_path: Path, opts: Optio
     region, oar_flags = _oars_of_image(data, region, axes, mask_path, opts, ctx, load)
     flags = flags + oar_flags
     with timer.stage("fill"):
-        target, info = apply_fill(data, full_region, axes, opts.fill, seed)
+        fill_mode, template, template_flags, template_info = prepare_fill(
+            opts, data, load(mask_path), full_region, axes, "the image", orientation_known=not no_orientation)
+        target, info = apply_fill(data, full_region, axes, fill_mode, seed, template=template)
+    info.update(template_info)
+    flags = flags + template_flags
     with timer.stage("write"):
         out = data.copy()
         out[region] = target[region]
@@ -645,12 +650,14 @@ def _deface_nifti(image_path: Path, mask_path: Path, out_path: Path, opts: Optio
         out_img = nib.Nifti1Image(stored.reshape(full_shape), img.affine, img.header)
         out_img.set_data_dtype(orig_dtype)
         out_img.header.set_slope_inter(slope, inter)
+        if info.get("fill") == "template":
+            out_img.header["descrip"] = SYNTHETIC_NOTE
         nib.save(out_img, str(out_path))
     with timer.stage("verify"):
         written = nib.load(str(out_path)).get_fdata().reshape(full_shape[:3])
         _check_image(written, data, target, region)
     with timer.stage("qc"):
-        _finish(data, written, region, axes, qc_dir, info, dilate_mm)
+        _finish(data, written, region, axes, qc_dir, info, dilate_mm, template)
         flags = flags + automatic_checks(mask_path, written, axes.si_axis, "the image")
     checks, found = run_optional_checks(
         opts, data, written, full_region, region, axes, ctx.ct_nii, ctx.tmp, ctx.tool_log, "the image", load, timer)
@@ -675,18 +682,24 @@ def _deface_nrrd(image_path: Path, mask_path: Path, out_path: Path, opts: Option
     region, oar_flags = _oars_of_image(data, region, axes, mask_path, opts, ctx, load)
     flags = flags + oar_flags
     with timer.stage("fill"):
-        target, info = apply_fill(data, full_region, axes, opts.fill, seed)
+        fill_mode, template, template_flags, template_info = prepare_fill(
+            opts, data, load(mask_path), full_region, axes, "the image", orientation_known=known)
+        target, info = apply_fill(data, full_region, axes, fill_mode, seed, template=template)
+    info.update(template_info)
+    flags = flags + template_flags
     with timer.stage("write"):
         out = data.copy()
         out[region] = target[region]
         out_img = sitk.GetImageFromArray(safe_cast(out, orig_dtype))
         out_img.CopyInformation(img)
+        if info.get("fill") == "template":
+            out_img.SetMetaData("DeidentificationNote", SYNTHETIC_NOTE)
         sitk.WriteImage(out_img, str(out_path))
     with timer.stage("verify"):
         written = sitk.GetArrayFromImage(sitk.ReadImage(str(out_path))).astype(np.float64)
         _check_image(written, data, target, region)
     with timer.stage("qc"):
-        _finish(data, written, region, axes, qc_dir, info, dilate_mm)
+        _finish(data, written, region, axes, qc_dir, info, dilate_mm, template)
         flags = flags + automatic_checks(mask_path, written, axes.si_axis, "the image")
     checks, found = run_optional_checks(
         opts, data, written, full_region, region, axes, ctx.ct_nii, ctx.tmp, ctx.tool_log, "the image", load, timer)
