@@ -39,8 +39,10 @@ def check_face_check() -> str | None:
     return None
 
 
-def render_views(hu: np.ndarray, region: np.ndarray, axes: Axes) -> dict[int, np.ndarray]:
-    """{yaw: BGR image} of the skin surface around the de-faced region (superior at the top)."""
+def render_views(hu: np.ndarray, region: np.ndarray, axes: Axes, skin_hu: float = SKIN_HU,
+                 yaws: tuple[int, ...] = YAWS) -> dict[int, np.ndarray]:
+    """{yaw: BGR image} of the skin surface around the de-faced region (superior at the top).
+    skin_hu is the surface threshold, yaws the views."""
     from scipy.ndimage import label, rotate, zoom
     oriented, reg = _oriented(hu, axes), _oriented(region, axes)
     if oriented is None or reg is None:
@@ -50,14 +52,14 @@ def render_views(hu: np.ndarray, region: np.ndarray, axes: Axes) -> dict[int, np
     if zs.size:
         margin = int(np.ceil(MARGIN_MM / spacing[0]))
         vol = vol[max(0, zs[0] - margin):zs[-1] + margin + 1]
-    tissue = zoom((vol > SKIN_HU).astype(np.float32), [s / RENDER_MM for s in spacing], order=1)
+    tissue = zoom((vol > skin_hu).astype(np.float32), [s / RENDER_MM for s in spacing], order=1)
     labels, found = label(tissue > 0.5)
     if found > 1:                                            # the head only: no couch behind it
         sizes = np.bincount(labels.ravel())
         sizes[0] = 0
         tissue = (labels == int(np.argmax(sizes))).astype(np.float32)
     views = {}
-    for yaw in YAWS:
+    for yaw in yaws:
         turned = tissue if yaw == 0 else rotate(tissue, yaw, axes=(1, 2), reshape=False, order=1)
         hit = turned[:, ::-1, :] > 0.5                       # index 0 = most anterior
         seen = hit.any(axis=1)
