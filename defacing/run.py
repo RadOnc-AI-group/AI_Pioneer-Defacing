@@ -47,7 +47,7 @@ class Reports:
     PATIENT_COLS = ["patient", "status", "seconds", "ct_series", "ct_files", "rt_files", "files_not_copied",
                     "rtdose_removed", "rtplan_removed", "rois_removed", "rois_unclear_kept", "face_mask_ml",
                     "fill", "rtstruct_unresolved_refs", "identifying_tags_populated", "rois_clipped", "rtdose_masked",
-                    "target_kept_ml", "target_exposed_cm2", "anatomy_check", "face_check", "face_check_score", "notes"]
+                    "target_kept_ml", "target_exposed_cm2", "oar_kept_ml", "oar_exposed_cm2", "anatomy_check", "face_check", "face_check_score", "notes"]
     TIMING_COLS = ["patient", "status", "device", "machine", "ct_series", "ct_files", "total_s",
                    *(f"{stage}_s" for stage in STAGES), "other_s"]
     ID_COLS = ["patient", "class", "keyword", "pseudonym_matches_folder", "n_distinct_values",
@@ -80,7 +80,8 @@ class Reports:
             r.rtdose_removed, r.rtplan_removed, ";".join(r.rois_removed), ";".join(r.rois_unclear),
             ";".join(f"{v:.1f}" for v in r.face_mask_ml), fills, r.unresolved_refs, ";".join(flagged),
             ";".join(r.rois_clipped), r.rtdose_masked, ";".join(f"{v:.2f}" for v in r.target_kept_ml),
-            ";".join(f"{v:.1f}" for v in r.target_exposed_cm2), r.anatomy_text(), face_status, face_score,
+            ";".join(f"{v:.1f}" for v in r.target_exposed_cm2), ";".join(f"{v:.2f}" for v in r.oar_kept_ml),
+            ";".join(f"{v:.1f}" for v in r.oar_exposed_cm2), r.anatomy_text(), face_status, face_score,
             " | ".join(([r.error] if r.error else []) + r.flags),
         ])
         if r.timing:
@@ -171,6 +172,10 @@ def final_summary(results: list[PatientResult], reports: Reports, out_root: Path
         lines.append(f"!!! TARGET VOXELS {verb} kept inside the de-faced region in "
                      f"{sum(1 for r in processed if any(t['kept'] for t in r.targets))} patient(s) (--deface-targets "
                      "replaces them); see target_exposed_cm2 in the report.")
+    oars = sum(1 for r in processed if any(v > 0 for v in r.oar_kept_ml))
+    if oars:
+        lines.append(f"!!! ORGAN AT RISK VOXELS {verb} restored below the skin in {oars} patient(s) "
+                     "(--keep-oar); see oar_kept_ml in the report and check the QC pictures.")
     removed = Counter(name for r in processed for name in r.rois_removed)
     if removed:
         lines.append(f"!!! CONTOURS {verb} removed from the RTSTRUCTs of "

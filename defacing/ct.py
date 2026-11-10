@@ -30,6 +30,7 @@ from .masks import Axes, applied_mask_sitk, mask_volume_ml, sitk_axes
 from .qc import automatic_checks, write_qc_picture
 from .rt import Grid, renamed
 from .segment import check_empty_mask, run_totalsegmentator
+from .oars import keep_oars
 from .targets import KeptTargets, kept_target_voxels
 from .timing import Timer
 
@@ -52,6 +53,7 @@ class SeriesResult:
     keep: np.ndarray | None = None            # target voxels inside the de-faced area that stay unchanged
     added_tissue: np.ndarray | None = None    # tissue written by the soft-tissue fill (for --clip-body)
     targets: KeptTargets | None = None
+    oars: KeptTargets | None = None
     checks: dict = field(default_factory=dict)  # results of the optional checks
 
 
@@ -61,7 +63,8 @@ def _deid_method(opts: Options, fill_info: dict) -> list[str]:
     return ["De-faced: TotalSegmentator face mask",
             f"dilate={dilation} extend_anterior={'yes' if opts.extend_anterior else 'no'}",
             f"fill={opts.fill}{seed}",
-            *(["Target voxels inside the region kept"] if fill_info.get("targets_kept_ml") else [])]
+            *(["Target voxels inside the region kept"] if fill_info.get("targets_kept_ml") else []),
+            *(["Organ at risk voxels below the skin inside the region kept"] if fill_info.get("oars_kept_ml") else [])]
 
 
 def _mark_defaced(ds: Dataset, opts: Options, fill_info: dict) -> None:
@@ -208,17 +211,28 @@ def deface_ct_series(files: list, label: str, out_dir: Path, qc_dir: Path, qc_su
         targets = (KeptTargets() if opts.deface_targets or not structs else
                    kept_target_voxels(structs, Grid.of(image), face, region, image_hu, axes, opts, label))
     flags += targets.flags
+    oars = KeptTargets()
+    load_mask = lambda p: applied_mask_sitk(sitk.ReadImage(str(p)), image, 0, False)
+    if opts.keep_oar:
+        with timer.stage("keep_oar"):
+            oars = keep_oars(structs, Grid.of(image), ct_nii, tmp, tool_log, face, region, image_hu, axes, opts, label,
+                             load_mask, targets.keep)
+        flags += oars.flags
     new_series_uid = generate_uid()
     seed = opts.seed if opts.seed is not None else fill_seed(new_series_uid)
     with timer.stage("fill"):
         target_hu, fill_info = apply_fill(image_hu, region, axes, opts.fill, seed)
     fill_info["dilate_mm"] = dilate_mm
-    # the fill sees the whole region, whatever is kept; target voxels are then simply left unchanged
+    # the fill sees the whole region, whatever is kept; target and OAR voxels are then simply left unchanged
     full_region = region
+    keep = targets.keep if oars.keep is None else (oars.keep if targets.keep is None else targets.keep | oars.keep)
+    if keep is not None:
+        target_hu[keep] = image_hu[keep]
+        region = region & ~keep
     if targets.keep is not None:
-        target_hu[targets.keep] = image_hu[targets.keep]
-        region = region & ~targets.keep
         fill_info["targets_kept_ml"] = targets.kept_ml
+    if oars.keep is not None:
+        fill_info["oars_kept_ml"] = oars.kept_ml
 
     out_dir.mkdir(parents=True, exist_ok=True)
     sop_map: dict[str, str] = {}
@@ -295,8 +309,7 @@ def deface_ct_series(files: list, label: str, out_dir: Path, qc_dir: Path, qc_su
         defaced.CopyInformation(image)
         sitk.WriteImage(defaced, str(qc_dir / f"CT_defaced{qc_suffix}.nii.gz"))
     checks, check_flags = run_optional_checks(
-        opts, image_hu, target_hu, full_region, region, axes, ct_nii, tmp, tool_log, label,
-        lambda p: applied_mask_sitk(sitk.ReadImage(str(p)), image, 0, False), timer)
+        opts, image_hu, target_hu, full_region, region, axes, ct_nii, tmp, tool_log, label, load_mask, timer)
     flags += check_flags
 
     added = region & (target_hu > BODY_HU) if opts.fill == "soft-tissue" else None
@@ -304,4 +317,4 @@ def deface_ct_series(files: list, label: str, out_dir: Path, qc_dir: Path, qc_su
                         frame_uid=frame_uid, sop_map=sop_map, grid=Grid.of(image), region=region,
                         face_ml=face_ml, fill_info=fill_info, flags=flags, face=face,
                         before=safe_cast(image_hu, np.int16), axes=axes, qc_suffix=qc_suffix,
-                        keep=targets.keep, added_tissue=added, targets=targets, checks=checks)
+                        keep=keep, added_tissue=added, targets=targets, oars=oars, checks=checks)

@@ -96,6 +96,17 @@ def main() -> int:
                          "covered (case-insensitive, repeatable)")
     rt.add_argument("--not-target", action="append", default=[], type=roi_pattern, metavar="REGEX",
                     help="Never count ROIs whose whole name matches REGEX as targets (case-insensitive, repeatable)")
+    rt.add_argument("--keep-oar", action="store_true",
+                    help="Restore the voxels of organs at risk (ROIs typed ORGAN) inside the de-faced region, but only "
+                         "below the skin; a CHECK line reports what was restored")
+    rt.add_argument("--keep-oar-ts", action="store_true",
+                    help="Like --keep-oar, and also restore TotalSegmentator's eyes, lenses, optic nerves, large "
+                         "salivary glands and mandible (more TotalSegmentator runs; works on NIfTI/NRRD as well)")
+    rt.add_argument("--keep-oar-depth-mm", type=float, default=None, metavar="MM",
+                    help="Restore OAR voxels only this far or further below the skin (default: 5; 0 restores "
+                         "the facial surface as well)")
+    rt.add_argument("--not-oar", action="append", default=[], type=roi_pattern, metavar="REGEX",
+                    help="Never restore ROIs whose whole name matches REGEX as OARs (case-insensitive, repeatable)")
 
     other = p.add_argument_group("other")
     other.add_argument("--no-pii-check", action="store_true",
@@ -132,6 +143,12 @@ def main() -> int:
         p.error("--keep-rtdose and --mask-rtdose cannot be combined")
     if args.deface_targets and (args.keep_roi or args.not_target):
         p.error("--keep-roi and --not-target have no effect with --deface-targets")
+    keep_oar = args.keep_oar or args.keep_oar_ts
+    if not keep_oar and (args.not_oar or args.keep_oar_depth_mm is not None):
+        p.error("--not-oar and --keep-oar-depth-mm need --keep-oar or --keep-oar-ts")
+    depth_mm = 5.0 if args.keep_oar_depth_mm is None else args.keep_oar_depth_mm
+    if not 0 <= depth_mm < 1000:
+        p.error("--keep-oar-depth-mm must be 0 or more (and finite)")
     if not 0 < args.face_check_threshold < 2:
         p.error("--face-check-threshold must be between 0 and 2")
     if args.depth < 1:
@@ -146,7 +163,9 @@ def main() -> int:
                    keep_body=args.keep_body, keep_skin=args.keep_skin, keep_rtplan=args.keep_rtplan,
                    keep_rtdose=args.keep_rtdose, remove_roi=args.remove_roi, pii_check=not args.no_pii_check,
                    allow_empty_mask=args.allow_empty_mask, deface_targets=args.deface_targets, keep_roi=args.keep_roi,
-                   not_target=args.not_target, clip_body=args.clip_body, mask_rtdose=args.mask_rtdose,
+                   not_target=args.not_target, keep_oar=keep_oar, keep_oar_ts=args.keep_oar_ts,
+                   keep_oar_depth_mm=depth_mm, not_oar=args.not_oar, clip_body=args.clip_body,
+                   mask_rtdose=args.mask_rtdose,
                    anatomy_check=args.anatomy_check, face_check=args.face_check, face_check_flag=args.face_check_flag,
                    face_check_fail=args.face_check_fail, face_check_threshold=args.face_check_threshold)
     out = args.output.expanduser().resolve()

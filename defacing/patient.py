@@ -44,8 +44,9 @@ from .qc import ROI_NEAR_MM, automatic_checks, roi_label, write_qc_picture, writ
 from .rt import (RegionStats, clip_roi, plan_roi_removal, referenced_series, remap_uids, renamed, roi_slices,
                  roi_table, rtstruct_image_refs, split_rois)
 from .rtdose import mask_dose, verify_dose
+from .oars import keep_oars, plan_oars
 from .segment import check_empty_mask, run_totalsegmentator
-from .targets import classify_target, plan_targets
+from .targets import KeptTargets, classify_target, plan_targets
 from .timing import Timer, machine_info
 
 PARTIAL_SUFFIX = ".partial"
@@ -78,6 +79,9 @@ class PatientResult:
     targets: list[dict] = field(default_factory=list)       # one per target inside the de-faced area
     target_kept_ml: list[float] = field(default_factory=list)      # per CT series
     target_exposed_cm2: list[float] = field(default_factory=list)  # per CT series
+    oars: list[dict] = field(default_factory=list)          # one per organ at risk inside the de-faced area
+    oar_kept_ml: list[float] = field(default_factory=list)  # per image
+    oar_exposed_cm2: list[float] = field(default_factory=list)     # per image
     checks: list[dict] = field(default_factory=list)        # optional checks, per CT series
     timing: dict[str, float] = field(default_factory=dict)  # seconds per stage
     machine: str = ""
@@ -92,6 +96,13 @@ class PatientResult:
             self.targets += s.targets.rows
             self.target_kept_ml.append(s.targets.kept_ml)
             self.target_exposed_cm2.append(s.targets.exposed_cm2)
+        if s.oars is not None:
+            self.add_oars(s.oars)
+
+    def add_oars(self, oars: KeptTargets) -> None:
+        self.oars += oars.rows
+        self.oar_kept_ml.append(oars.kept_ml)
+        self.oar_exposed_cm2.append(oars.exposed_cm2)
 
     def face_check_text(self) -> tuple[str, str]:
         """(status, score) of the face check per CT series, for the report."""
@@ -130,6 +141,7 @@ def write_manifest(qc_dir: Path, res: PatientResult, opts: Options) -> None:
         "rois_removed": res.rois_removed, "rtdose_removed": res.rtdose_removed,
         "rtplan_removed": res.rtplan_removed, "rois_clipped": res.rois_clipped, "rtdose_masked": res.rtdose_masked,
         "targets": res.targets, "target_kept_ml": res.target_kept_ml, "target_exposed_cm2": res.target_exposed_cm2,
+        "oars": res.oars, "oar_kept_ml": res.oar_kept_ml, "oar_exposed_cm2": res.oar_exposed_cm2,
         "anatomy_check": opts.anatomy_check, "face_check": opts.face_check, "checks": res.checks,
         "timing_seconds": {k: round(v, 2) for k, v in res.timing.items()}, "machine": res.machine,
     }, indent=2), encoding="utf-8")
@@ -183,6 +195,13 @@ def _log_plan(inv: Inventory, res: PatientResult, opts: Options, dry_run: bool) 
             if targets.rejected:
                 log.warning(f"    ! {f.rel.name}: look like targets but are NOT kept (helper, Body or unclear names): "
                             f"{', '.join(sorted(targets.rejected))} (keep with --keep-roi NAME)")
+        if opts.keep_oar:
+            oars = plan_oars(f.rois, opts)
+            log.info(f"    {f.rel.name}: organs at risk {'would be ' if dry_run else ''}restored below the skin where "
+                     f"they lie in the de-faced region: {', '.join(sorted(oars.keep.values())) or 'none'}")
+            if oars.skipped:
+                log.info(f"    {f.rel.name}: typed ORGAN but not restored (helper, teeth or unclear names): "
+                         f"{', '.join(sorted(oars.skipped))}")
         if not plan.has_body and not opts.keep_body:
             res.flags.append(f"{f.rel.name}: no Body/External ROI recognised; check the structure set "
                              "for a skin contour (remove it with --remove-roi NAME)")
@@ -335,18 +354,26 @@ def _structures_by_series(inv: Inventory, groups: list, res: PatientResult, opts
     """(file name, dataset) of the RTSTRUCTs drawn on each CT series (old Series UID), for
     keeping their target volumes. A structure set without a matching series is reported."""
     by_series: dict[str, list] = {}
-    if opts.deface_targets:
+    if opts.deface_targets and not opts.keep_oar:
         return by_series
     refs = [_SeriesRef(files[0].series_uid, "", files[0].frame_uid, {f.sop_uid: f.sop_uid for f in files})
             for files in groups]
+
+    def needed(f) -> bool:
+        if f.modality != "RTSTRUCT":
+            return False
+        plan = plan_targets(f.rois, opts)
+        return bool((not opts.deface_targets and (plan.keep or plan.rejected))
+                    or (opts.keep_oar and plan_oars(f.rois, opts).keep))
+
     for f in inv.rt:
-        if f.modality != "RTSTRUCT" or not plan_targets(f.rois, opts).keep:
+        if not needed(f):
             continue
         ds = pydicom.dcmread(f.path)
         ref = _series_for(ds, refs)
         if ref is None:
             res.flags.append(f"{f.rel.name}: the CT series it was drawn on was not found, so its target volumes "
-                             "could not be kept (their voxels were de-faced)")
+                             "and organs at risk could not be kept (their voxels were de-faced)")
         else:
             by_series.setdefault(ref.old_series_uid, []).append((f.rel.name, ds))
     return by_series
@@ -459,6 +486,8 @@ def deface_image_file(input_path: Path, rel: str, out_dir: Path, qc_dir: Path, o
     timer = Timer()
     if not opts.deface_targets:
         log.info("    NIfTI/NRRD input has no contours: target volumes cannot be kept, the whole region is replaced")
+    if opts.keep_oar and not opts.keep_oar_ts:
+        log.info("    NIfTI/NRRD input has no contours: --keep-oar restores nothing (--keep-oar-ts uses TotalSegmentator)")
     if opts.pii_check:
         res.pii = header_findings(input_path)
     if dry_run:
@@ -496,6 +525,8 @@ def deface_image_file(input_path: Path, rel: str, out_dir: Path, qc_dir: Path, o
                 info, flags, checks = _deface_nifti(input_path, mask_path, out_path, opts, seed, qc_dir, run_ctx)
             res.flags += flags
             res.checks.append(checks)
+            if opts.keep_oar:
+                res.add_oars(run_ctx.oars)
             shutil.copy2(mask_path, qc_dir / "face_mask.nii.gz")
         res.face_mask_ml, res.fill = [face_ml], [info]
         res.timing = timer.seconds
@@ -514,6 +545,18 @@ class _ImageRun:
     tmp: Path
     tool_log: Path
     timer: Timer
+    oars: KeptTargets = field(default_factory=KeptTargets)
+
+
+def _oars_of_image(data: np.ndarray, region: np.ndarray, axes, mask_path: Path, opts: Options, ctx: _ImageRun,
+                   load) -> tuple[np.ndarray, list[str]]:
+    """The voxels of a NIfTI/NRRD image to replace (the region minus restored OARs), and CHECK lines."""
+    if not opts.keep_oar:
+        return region, []
+    with ctx.timer.stage("keep_oar"):
+        ctx.oars = keep_oars(None, None, ctx.ct_nii, ctx.tmp, ctx.tool_log, load(mask_path), region, data, axes, opts,
+                             "the image", load)
+    return region if ctx.oars.keep is None else region & ~ctx.oars.keep, ctx.oars.flags
 
 
 def _prior_of_image(path: Path, suffix: str) -> str | None:
@@ -588,8 +631,12 @@ def _deface_nifti(image_path: Path, mask_path: Path, out_path: Path, opts: Optio
         region = applied_mask_nifti(nib.load(str(mask_path)), img, opts.dilate, opts.extend_anterior, hu=data,
                                     dilate_by_mm=dilate_mm)
     axes = nifti_axes(img)
+    load = lambda p: applied_mask_nifti(nib.load(str(p)), img, 0, False)
+    full_region = region
+    region, oar_flags = _oars_of_image(data, region, axes, mask_path, opts, ctx, load)
+    flags = flags + oar_flags
     with timer.stage("fill"):
-        target, info = apply_fill(data, region, axes, opts.fill, seed)
+        target, info = apply_fill(data, full_region, axes, opts.fill, seed)
     with timer.stage("write"):
         out = data.copy()
         out[region] = target[region]
@@ -606,8 +653,7 @@ def _deface_nifti(image_path: Path, mask_path: Path, out_path: Path, opts: Optio
         _finish(data, written, region, axes, qc_dir, info, dilate_mm)
         flags = flags + automatic_checks(mask_path, written, axes.si_axis, "the image")
     checks, found = run_optional_checks(
-        opts, data, written, region, region, axes, ctx.ct_nii, ctx.tmp, ctx.tool_log, "the image",
-        lambda p: applied_mask_nifti(nib.load(str(p)), img, 0, False), timer)
+        opts, data, written, full_region, region, axes, ctx.ct_nii, ctx.tmp, ctx.tool_log, "the image", load, timer)
     return info, flags + found, checks
 
 
@@ -624,8 +670,12 @@ def _deface_nrrd(image_path: Path, mask_path: Path, out_path: Path, opts: Option
         region = applied_mask_sitk(sitk.ReadImage(str(mask_path)), img, opts.dilate, opts.extend_anterior, hu=data,
                                    dilate_by_mm=dilate_mm)
     axes = sitk_axes(img)
+    load = lambda p: applied_mask_sitk(sitk.ReadImage(str(p)), img, 0, False)
+    full_region = region
+    region, oar_flags = _oars_of_image(data, region, axes, mask_path, opts, ctx, load)
+    flags = flags + oar_flags
     with timer.stage("fill"):
-        target, info = apply_fill(data, region, axes, opts.fill, seed)
+        target, info = apply_fill(data, full_region, axes, opts.fill, seed)
     with timer.stage("write"):
         out = data.copy()
         out[region] = target[region]
@@ -639,6 +689,5 @@ def _deface_nrrd(image_path: Path, mask_path: Path, out_path: Path, opts: Option
         _finish(data, written, region, axes, qc_dir, info, dilate_mm)
         flags = flags + automatic_checks(mask_path, written, axes.si_axis, "the image")
     checks, found = run_optional_checks(
-        opts, data, written, region, region, axes, ctx.ct_nii, ctx.tmp, ctx.tool_log, "the image",
-        lambda p: applied_mask_sitk(sitk.ReadImage(str(p)), img, 0, False), timer)
+        opts, data, written, full_region, region, axes, ctx.ct_nii, ctx.tmp, ctx.tool_log, "the image", load, timer)
     return info, flags + found, checks

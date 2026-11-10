@@ -127,11 +127,17 @@ def kept_target_voxels(structs: list[tuple[str, object]], grid: Grid, face: np.n
     voxel_ml = float(np.prod(grid.spacing)) / 1000.0
     keep = np.zeros_like(region)
     for rs_name, ds in structs:
-        plan = plan_targets(roi_table(ds), opts)
-        if not plan.keep:
+        rois = roi_table(ds)
+        plan = plan_targets(rois, opts)
+        if not plan.keep and not plan.rejected:
             continue
+        replaced = []
         for number, slices in roi_slices(ds, grid):
             if number not in plan.keep:
+                if number in rois and rois[number][0] in plan.rejected:
+                    inside = sum(int((m & region[z]).sum()) for z, m in slices.items())
+                    if inside:
+                        replaced.append(f"{rois[number][0]!r} ({inside * voxel_ml:.1f} ml)")
                 continue
             name = plan.keep[number]
             inside = sum(int((m & region[z]).sum()) for z, m in slices.items())
@@ -150,6 +156,9 @@ def kept_target_voxels(structs: list[tuple[str, object]], grid: Grid, face: np.n
                     keep[z] |= m & region[z]
             out.rows.append({"rtstruct": rs_name, "roi": name, "ml_in_region": round(inside * voxel_ml, 2),
                              "pct_of_face_mask": round(100 * share, 1), "kept": kept})
+        if replaced:
+            out.flags.append(f"{label}: ROI(s) that look like targets but count as helpers are replaced in the de-faced "
+                             f"region: {', '.join(replaced)} (if one is a true target: --keep-roi NAME)")
     if keep.any():
         out.keep = keep
         out.kept_ml = round(float(keep.sum()) * voxel_ml, 2)

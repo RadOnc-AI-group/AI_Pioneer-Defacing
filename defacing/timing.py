@@ -9,7 +9,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 
 # in processing order; the stages of the optional checks are 0 when they are not used
-STAGES = ("inventory", "read", "segment", "anatomy_check", "mask", "targets", "fill", "write", "verify", "qc",
+STAGES = ("inventory", "read", "segment", "anatomy_check", "mask", "targets", "keep_oar", "fill", "write", "verify", "qc",
           "face_check", "rt_copy")
 
 

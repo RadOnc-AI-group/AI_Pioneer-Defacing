@@ -158,6 +158,10 @@ The removed contours are saved in the QC folder as a separate RTSTRUCT that refe
 | `--deface-targets` | off (targets kept) | Replaces the voxels of target volumes inside the region as well |
 | `--keep-roi REGEX` | | Also keep the voxels of ROIs whose whole name matches (case-insensitive, repeatable); overrules the size limit, not Body/Skin |
 | `--not-target REGEX` | | Never count ROIs whose whole name matches as targets (case-insensitive, repeatable) |
+| `--keep-oar` | off | Restores organs at risk (ROIs typed `ORGAN`) inside the region, below the skin only (see [Organs at risk](#organs-at-risk)) |
+| `--keep-oar-ts` | off | As `--keep-oar`, and also TotalSegmentator's eyes, lenses, optic nerves, large salivary glands and mandible (more runs, no license needed; also on NIfTI/NRRD) |
+| `--keep-oar-depth-mm MM` | `5` | Only OAR voxels at least this far below the skin are restored (`0`: the facial surface as well) |
+| `--not-oar REGEX` | | Never restore ROIs whose whole name matches (case-insensitive, repeatable) |
 | `--clip-body` | off | Keeps Body/External, cut back to the image that remains (see [Clipped Body contour](#clipped-body-contour)). Cannot be combined with `--keep-body` |
 | `--mask-rtdose` | off | Copies RTDOSE with the dose set to zero in the de-faced region. Cannot be combined with `--keep-rtdose` |
 | `--anatomy-check` | off | Reports tissue left in front of landmarks behind the face (more TotalSegmentator runs, no license needed) |
@@ -246,7 +250,7 @@ A ROI counts as a target by its `RTROIInterpretedType` (`PTV`, `CTV`, `GTV`) or 
 - `ZV`, `ZV_60Gy`, `Zielvolumen`, `Planungszielvolumen`, `Klinisches Zielvolumen`, `Makroskopisches Tumorvolumen`;
 - the full English terms (`Planning Target Volume`, `Gross Tumour Volume`, ...).
 
-Not kept, and reported, are helper structures and anything that may follow the skin: names with a helper prefix (`z_PTV`, `x_CTV`), `ring`, `opt`, `avoid`, `NonPTV`, `Hilfs...`, expansions and subtractions (`PTV+5mm`, `PTV70-PTV60`), and every name that is Body, Skin or unclear ([Body and Skin contours](#body-and-skin-contours)), such as `Body-PTV` or `PTV-Haut`. Bare `Boost`, `Tumorbett`, `LK` and `Lymphknoten` are not targets either. Check the dry run: it lists kept and rejected names. Use `--keep-roi` and `--not-target` for the names of your site.
+Not kept, and reported, are helper structures and anything that may follow the skin: names with a helper prefix (`z_PTV`, `x_CTV`), `ring`, `opt`, `avoid`, `NonPTV`, `Hilfs...`, expansions and subtractions (`PTV+5mm`, `PTV70-PTV60`), and every name that is Body, Skin or unclear ([Body and Skin contours](#body-and-skin-contours)), such as `Body-PTV` or `PTV-Haut`. Bare `Boost`, `Tumorbett`, `LK` and `Lymphknoten` are not targets either. Check the dry run: it lists kept and rejected names. A rejected ROI that lies in the de-faced region is replaced there and raises a CHECK with its volume. Use `--keep-roi` and `--not-target` for the names of your site.
 
 | Share of the face mask a target covers | Result |
 |---|---|
@@ -255,6 +259,20 @@ Not kept, and reported, are helper structures and anything that may follow the s
 | 75% or more | **not kept** (probably not a true target), reported; `--keep-roi` keeps it |
 
 **Where a target reaches the skin, that part of the surface stays visible** in a 3D rendering. `target_exposed_cm2` in `patients_*.csv` gives the area seen from the front where kept tissue has at most 5 mm of tissue in front of it, and a CHECK line is shown above 5 cm². `is_target` and `ml_kept_in_region` in the [ROI overlap report](#roi-overlap-report) show what was kept. `--deface-targets` gives the output of tool version 5 (no voxels kept).
+
+### Organs at risk
+
+`--keep-oar` restores the voxels of organs at risk inside the de-faced region, so that contours such as mandible and eyes still describe the image. It is off by default because it puts anatomy back into the face region. The rest of the region is filled as usual, so restored organs can stand in air, and dose recalculation at the front of the head stays unreliable.
+
+**Which ROIs.** Every ROI with `RTROIInterpretedType` `ORGAN`, except targets, Body/Skin/unclear names, helpers and planning risk volumes (`z_...`, `Ring`, `opt`, `PRV`, `+5mm`, `-PTV`) and teeth (dental features identify a person). A site that leaves this field empty gets no OARs, and a CHECK line says so. `--not-oar` excludes names; `--keep-roi` keeps a whole ROI with no depth limit.
+
+**Only below the skin.** A voxel is restored only if it lies at least `--keep-oar-depth-mm` (default 5) from the outside of the patient, so the facial surface stays removed. Air in sinuses and under a thermoplastic mask does not count as outside. A thin organ loses most of its volume: little of the lips remains, and the front of the eye is removed. Mandible and most of the globe remain.
+
+**Size limit.** A structure covering 25% or more of the *tissue* in the face mask is not restored and raises a CHECK line, because it is probably a face or head contour. The share is taken of the tissue because most of a face mask is air. A second CHECK line appears if the restored OARs together reach 25%. These are starting values.
+
+**Reporting.** Every case with restored voxels gets a CHECK line with the volume and the area near the skin; `oar_kept_ml` and `oar_exposed_cm2` are in `patients_*.csv`, the per-ROI list in the manifest. `--mask-rtdose` keeps the dose in restored voxels, as for targets. Run `--face-check` as well: eyes and mouth are what face detectors look for.
+
+`--keep-oar-ts` adds TotalSegmentator's structures, for scans without contours and for NIfTI/NRRD input. They are automatic contours and should be reviewed; TotalSegmentator has no lips class. With `--anatomy-check` the same segmentations are reused.
 
 ### Clipped Body contour
 
@@ -270,7 +288,7 @@ With `--mask-rtdose` the RTDOSE file is copied with the dose set to zero in the 
 
 ### Anatomy check
 
-`--anatomy-check` catches a partial face mask. It runs TotalSegmentator's open tasks `head_glands_cavities` and `craniofacial_structures` (no license needed) and reports unchanged tissue in front of landmarks that the face mask does not depend on: the nasal cavity (nose), teeth (lips), lenses (eyelids) and mandible (chin, report only). TotalSegmentator has no nose class of its own. It also reports brain inside the de-faced region and a nasal cavity that is not in front of the brain (wrong orientation).
+`--anatomy-check` catches a partial face mask. It runs TotalSegmentator's open tasks `head_glands_cavities` and `craniofacial_structures` (no license needed) and reports unchanged tissue in front of landmarks that the face mask does not depend on: the nasal cavity (nose), teeth (lips), lenses (eyelids) and mandible (chin, report only). TotalSegmentator has no nose class of its own. Only the front 10 mm of a landmark counts, because deeper parts lie behind tissue that is meant to stay (the maxilla in front of the rear nasal cavity, the cheek in front of the molars). It also reports brain inside the de-faced region and a nasal cavity that is not in front of the brain (wrong orientation).
 
 The results go to the manifest and to `anatomy_check` in `patients_*.csv`. It only adds CHECK lines. Run it on a few typical cases of a protocol first: **the thresholds are starting values and have not been calibrated on real scans** (a mask that ends just behind the lips leaves tissue in front of the teeth without showing the face).
 

@@ -25,6 +25,7 @@ from .segment import run_task
 
 LANDMARK_TASKS = ("head_glands_cavities", "craniofacial_structures")
 MIN_AREA_CM2 = 0.5          # tissue in front of a landmark over less than this is ignored
+FRONT_MM = 10.0             # only this front part of a landmark counts: maxilla and palate lie before its rear
 BRAIN_CHECK_ML = 5.0        # more brain than this inside the de-faced region is reported
 
 
@@ -43,10 +44,20 @@ LANDMARKS = (Landmark("nose", ("nasal_cavity_left", "nasal_cavity_right"), "nasa
              Landmark("chin", ("mandible",), "mandible", 5.0, check=False))
 
 
+def segment_open_tasks(input_nii: Path, seg_dir: Path, device: str, log_path: Path) -> Path:
+    """The open TotalSegmentator tasks, once per image (--keep-oar-ts and --anatomy-check share them)."""
+    marker = seg_dir / ".open_tasks_done"
+    if not marker.exists():
+        for task in LANDMARK_TASKS:
+            run_task(task, input_nii, seg_dir, device, log_path)
+        seg_dir.mkdir(parents=True, exist_ok=True)
+        marker.touch()
+    return seg_dir
+
+
 def segment_landmarks(input_nii: Path, seg_dir: Path, device: str, log_path: Path) -> Path:
     """Run the open TotalSegmentator tasks; every structure ends up as <name>.nii.gz in seg_dir."""
-    for task in LANDMARK_TASKS:
-        run_task(task, input_nii, seg_dir, device, log_path)
+    segment_open_tasks(input_nii, seg_dir, device, log_path)
     run_task("total", input_nii, seg_dir, device, log_path, ("--fastest", "--roi_subset", "skull", "brain"))
     return seg_dir
 
@@ -58,11 +69,13 @@ def _anterior_first(vol: np.ndarray, axes: Axes) -> np.ndarray:
 
 
 def tissue_in_front(landmark: np.ndarray, tissue: np.ndarray, axes: Axes) -> tuple[np.ndarray, np.ndarray]:
-    """(lines through the landmark, tissue in mm in front of it on each line); 2D arrays."""
+    """(lines through the front of the landmark, tissue in mm in front of it on each line); 2D arrays.
+    `landmark` must not be empty."""
     ap = axes.spacing[axes.anterior[0]]
     mark, unchanged = _anterior_first(landmark, axes), _anterior_first(tissue, axes)
     lines = mark.any(axis=0)
     first = np.argmax(mark, axis=0)
+    lines &= first <= first[lines].min() + FRONT_MM / ap
     cum = np.cumsum(unchanged, axis=0, dtype=np.int32)
     upto = np.take_along_axis(cum, first[None], 0)[0] - np.take_along_axis(unchanged, first[None], 0)[0]
     return lines, upto * ap

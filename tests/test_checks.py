@@ -60,6 +60,26 @@ def test_removed_tissue_in_front_is_fine(tmp_path):
     assert not flags and results["nose"]["max_tissue_mm"] == 0.0
 
 
+def test_tissue_in_front_of_the_rear_of_a_landmark_is_ignored(tmp_path):
+    hu, _ = anatomy_case(tmp_path, "nasal_cavity_left")
+    cavity = np.zeros(hu.shape, bool)
+    cavity[8:14, 20:24, 12:18] = True                          # front of the cavity
+    cavity[8:14, 30:34, 18:24] = True                          # rear part, 20 mm further back
+    region = np.zeros_like(cavity)
+    region[:, :20, 12:18] = True                               # the nose is gone, the maxilla is not
+    results, flags = anatomy_assess(hu, region, region, AXES, lambda p: cavity, tmp_path, "CT")
+    assert not flags and results["nose"]["max_tissue_mm"] == 0.0
+
+
+def test_a_thin_shell_removed_from_the_nose_is_still_reported(tmp_path):
+    hu, load = anatomy_case(tmp_path, "nasal_cavity_left")
+    region = np.zeros_like(hu, bool)
+    region[:, :12, :] = True                                   # only the outer 4 mm of the skin
+    results, flags = anatomy_assess(hu, region, region, AXES, load, tmp_path, "CT")
+    assert results["nose"]["max_tissue_mm"] == pytest.approx(16.0)
+    assert any("the nose may not be removed" in f for f in flags)
+
+
 def test_chin_is_only_reported_in_the_results(tmp_path):
     hu, load = anatomy_case(tmp_path, "mandible")
     region = np.zeros_like(hu, bool)

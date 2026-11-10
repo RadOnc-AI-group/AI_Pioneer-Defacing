@@ -45,6 +45,21 @@ def test_classify_target(name, kind, expected):
     assert classify_target(name, kind) == expected
 
 
+def test_a_helper_in_the_region_is_replaced_and_reported(monkeypatch):
+    import defacing.targets as targets
+    region = np.zeros((4, 10, 10), bool)
+    region[1:3, :5, :] = True
+    contour = np.zeros((10, 10), bool)
+    contour[:3, :3] = True
+    monkeypatch.setattr(targets, "roi_table", lambda ds: {1: ("z_PTV", "PTV"), 2: ("Ring_PTV", "")})
+    monkeypatch.setattr(targets, "roi_slices", lambda ds, grid: [(1, {1: contour}), (2, {0: contour})])     # 2: outside
+    grid = type("G", (), {"spacing": (2.0, 2.0, 2.0)})()
+    kept = targets.kept_target_voxels([("rs", object())], grid, region, region, np.full(region.shape, 40.0),
+                                      Axes((2.0, 2.0, 2.0), (1, False), 0), Options(), "CT")
+    assert kept.keep is None and not kept.rows and len(kept.flags) == 1
+    assert "'z_PTV' (0.1 ml)" in kept.flags[0] and "Ring_PTV" not in kept.flags[0]
+
+
 def test_german_umlauts_are_normalised():
     assert classify_target("PLANUNGSZIELVOLUMEN", "") == "target"
     assert classify_target("Körper-PTV", "") == "rejected"

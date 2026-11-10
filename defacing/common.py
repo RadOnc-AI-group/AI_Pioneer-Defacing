@@ -39,6 +39,10 @@ class Options:
     deface_targets: bool = False    # True: target volumes inside the region are de-faced as well
     keep_roi: list[re.Pattern] = field(default_factory=list)     # also keep these ROIs' voxels
     not_target: list[re.Pattern] = field(default_factory=list)   # never count these ROIs as targets
+    keep_oar: bool = False          # True: organs at risk are restored below the skin
+    keep_oar_ts: bool = False       # True: TotalSegmentator's organs at risk as well
+    keep_oar_depth_mm: float = 5.0  # only voxels at least this far below the skin
+    not_oar: list[re.Pattern] = field(default_factory=list)      # never restore these
     clip_body: bool = False
     mask_rtdose: bool = False
     anatomy_check: bool = False
@@ -54,7 +58,9 @@ class Options:
                 "keep_rtplan": self.keep_rtplan, "keep_rtdose": self.keep_rtdose,
                 "remove_roi": [p.pattern for p in self.remove_roi], "deface_targets": self.deface_targets,
                 "keep_roi": [p.pattern for p in self.keep_roi], "not_target": [p.pattern for p in self.not_target],
-                "clip_body": self.clip_body, "mask_rtdose": self.mask_rtdose}
+                "clip_body": self.clip_body, "mask_rtdose": self.mask_rtdose, "keep_oar": self.keep_oar,
+                "keep_oar_ts": self.keep_oar_ts, "keep_oar_depth_mm": self.keep_oar_depth_mm,
+                "not_oar": [p.pattern for p in self.not_oar]}
 
 
 def classify_suffix(path: Path) -> str:
