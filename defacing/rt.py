@@ -15,6 +15,8 @@ from pydicom.multival import MultiValue
 from pydicom.sequence import Sequence
 from pydicom.uid import generate_uid
 
+from .common import PatientError
+
 # ROI names are normalised (lower case, umlauts as ae/oe/ue, ß as ss) before matching.
 # A name that is one of these words, optionally followed by a number or a thickness
 # ("BODY_1", "BODY (1)", "Skin 5mm", "Haut_3mm"), is removed. A name that only CONTAINS one of the
@@ -66,6 +68,7 @@ class RoiPlan:
     remove: dict[int, str] = field(default_factory=dict)    # ROINumber -> ROI name
     unclear: list[str] = field(default_factory=list)        # kept, but may follow the skin/face
     has_body: bool = False
+    clip: dict[int, str] = field(default_factory=dict)      # Body, cut back to the remaining image (--clip-body)
 
 
 def plan_roi_removal(rois: dict[int, tuple[str, str]], opts) -> RoiPlan:
@@ -73,7 +76,9 @@ def plan_roi_removal(rois: dict[int, tuple[str, str]], opts) -> RoiPlan:
     for number, (name, kind) in rois.items():
         cls = classify_roi(name, kind)
         plan.has_body |= cls == "body"
-        if cls == "body" and not opts.keep_body:
+        if cls == "body" and opts.clip_body:
+            plan.clip[number] = name
+        elif cls == "body" and not opts.keep_body:
             plan.remove[number] = name
         elif cls == "skin" and not opts.keep_skin:
             plan.remove[number] = name
@@ -175,6 +180,10 @@ class Grid:
         m = self.direction * self.spacing[None, :]
         return np.linalg.solve(m, (points - self.origin).T).T
 
+    def to_world(self, index: np.ndarray) -> np.ndarray:
+        """(n, 3) continuous indices (x, y, z) -> (n, 3) world points (mm, LPS)."""
+        return self.origin + (self.direction * self.spacing[None, :] @ index.T).T
+
 
 def fill_polygon(cols: np.ndarray, rows: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
     """Pixels whose centres lie inside a closed polygon (even-odd rule), by scanlines."""
@@ -211,6 +220,68 @@ def roi_slices(ds: Dataset, grid: Grid) -> Iterator[tuple[int, dict[int, np.ndar
             poly = fill_polygon(idx[:, 0], idx[:, 1], (ny, nx))
             slices[z] = slices[z] ^ poly if z in slices else poly
         yield int(roi.get("ReferencedROINumber", -1)), slices
+
+
+def _trace(mask: np.ndarray, grid: Grid, z: int) -> list[np.ndarray]:
+    """Closed outlines, in world coordinates, whose even-odd filling gives exactly `mask`."""
+    from skimage.measure import find_contours
+    loops = []
+    # 0.5 lies between the pixel centres; padded, so that an edge pixel is enclosed too
+    for rc in find_contours(np.pad(mask, 1).astype(np.float32), 0.5):
+        idx = np.column_stack([rc[:-1, 1] - 1, rc[:-1, 0] - 1, np.full(len(rc) - 1, float(z))])
+        loops.append(np.round(grid.to_world(idx), 3))
+    return loops
+
+
+def clip_roi(ds: Dataset, number: int, grid: Grid, remove: np.ndarray, add: np.ndarray | None = None) -> dict:
+    """
+    Cut ROI `number` back to the voxels that remain after de-facing, in place.
+
+    On a slice that touches `remove` (z, y, x), the original contours, which trace the
+    removed surface, are replaced by new outlines traced from the remaining voxels; no
+    original point survives there. `add` (z, y, x) is included in the outline (tissue
+    written by the soft-tissue fill). Other slices are unchanged. A contour that cannot be
+    assigned to an image slice is dropped, as it might show the face.
+    """
+    item = next(r for r in ds.ROIContourSequence if int(r.get("ReferencedROINumber", -1)) == number)
+    nx, ny, nz = grid.size
+    touched = remove.any(axis=(1, 2)) | (add.any(axis=(1, 2)) if add is not None else False)
+    kept, slices, first, dropped = [], {}, {}, 0
+    for contour in item.get("ContourSequence", []):
+        data = contour.get("ContourData")
+        if not data or len(data) < 9 or str(contour.get("ContourGeometricType", "CLOSED_PLANAR")) != "CLOSED_PLANAR":
+            dropped += 1
+            continue
+        idx = grid.to_index(np.asarray(data, float).reshape(-1, 3))
+        z = int(round(float(np.median(idx[:, 2]))))
+        if not 0 <= z < nz or np.ptp(idx[:, 2]) > 0.5:
+            dropped += 1
+            continue
+        if not touched[z]:
+            kept.append(contour)
+            continue
+        poly = fill_polygon(idx[:, 0], idx[:, 1], (ny, nx))
+        slices[z] = slices[z] ^ poly if z in slices else poly
+        first.setdefault(z, contour)
+    new = []
+    for z, poly in slices.items():
+        mask = poly & ~remove[z]
+        if add is not None:
+            mask |= add[z]
+        if not mask.any():
+            continue
+        check = np.zeros_like(mask)
+        for loop in _trace(mask, grid, z):
+            contour = copy.deepcopy(first[z])
+            contour.ContourData = [f"{v:.3f}" for v in loop.ravel()]
+            contour.NumberOfContourPoints = len(loop)
+            new.append(contour)
+            back = grid.to_index(loop)
+            check ^= fill_polygon(back[:, 0], back[:, 1], (ny, nx))
+        if not np.array_equal(check, mask):
+            raise PatientError(f"verification: the clipped contour on slice {z} does not match the remaining voxels")
+    item.ContourSequence = Sequence(kept + new)
+    return {"slices_clipped": len(slices), "contours_dropped": dropped}
 
 
 @dataclass

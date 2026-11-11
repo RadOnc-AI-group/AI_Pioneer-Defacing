@@ -1,0 +1,15 @@
+flame_template.npz is derived from FLAME 2023 Open.
+
+Credit: FLAME, Max Planck Institute for Intelligent Systems (https://flame.is.tue.mpg.de).
+Licence: Creative Commons Attribution 4.0 (https://creativecommons.org/licenses/by/4.0/) with
+the additional terms of the FLAME model licence (https://flame.is.tue.mpg.de/modellicense.html),
+which among others do not allow using the model to create fake, libelous, misleading or defamatory
+content, apart from analyses in peer-reviewed scientific research. Read them before sharing
+images made with this template.
+
+Changes made: only the mean shape (v_template) and the triangles were kept, converted from metres
+to millimetres and to (left-right, anterior, superior) axes; each vertex was given a region label
+by a geometric rule; shape, expression and pose spaces were dropped.
+
+Cite the FLAME paper when reporting results: Li T, Bolkart T, Black MJ, Li H, Romero J. Learning a
+model of facial shape and expression from 4D scans. ACM Transactions on Graphics 36(6), 2017.

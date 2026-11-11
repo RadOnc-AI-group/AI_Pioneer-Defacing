@@ -1,0 +1,59 @@
+radface - CT de-facing tool
+Copyright 2026 Richard Osuala, Josef Buchner and the radface contributors
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE),
+except for the files listed at the end of LICENSE.
+
+-------------------------------------------------------------------------------
+Bundled third-party material
+-------------------------------------------------------------------------------
+
+defacing/data/flame_template.npz
+    Derived from FLAME 2023 Open, Max Planck Institute for Intelligent Systems
+    (https://flame.is.tue.mpg.de). Licence: CC-BY-4.0 with the additional terms
+    of the FLAME model licence, which among others do not allow creating fake,
+    libelous, misleading or defamatory content. Changes and citation:
+    defacing/data/flame_template.npz.NOTICE.txt.
+    Li T, Bolkart T, Black MJ, Li H, Romero J. Learning a model of facial shape
+    and expression from 4D scans. ACM Trans Graph 36(6), 2017.
+
+-------------------------------------------------------------------------------
+Dependencies (not included in this repository; installed separately)
+-------------------------------------------------------------------------------
+
+Licences as declared by the pinned versions in requirements*.txt. Each package
+keeps its own licence; the transitive packages are listed in
+requirements-lock.txt.
+
+  Package                          Licence
+  TotalSegmentator                 Apache-2.0
+  nnU-Net (nnunetv2)               Apache-2.0
+  SimpleITK                        Apache-2.0
+  python-gdcm                      Apache-2.0
+  nibabel                          MIT
+  pydicom                          MIT
+  dicom2nifti                      MIT
+  scipy                            BSD-3-Clause
+  scikit-image                     BSD-3-Clause
+  numpy                            BSD-3-Clause (and other permissive licences)
+  PyTorch                          BSD-3-Clause (and other permissive licences)
+  Optional face check (requirements-reid.txt):
+  deepface                         MIT
+  retina-face                      MIT
+  onnxruntime                      MIT
+  opencv-contrib-python-headless   Apache-2.0
+  Tests: pytest                    MIT
+
+Model weights (downloaded at run time, not included, own terms)
+
+  TotalSegmentator weights   The "face" task used by this tool is free for
+                             non-commercial use only; commercial use requires a
+                             licence from the TotalSegmentator authors
+                             (https://github.com/wasserth/TotalSegmentator).
+                             The open tasks used by --keep-oar-ts and
+                             --anatomy-check need no licence key.
+  Face check models          The FaceNet512 and RetinaFace weights fetched by
+                             "python -m defacing.reid --download" keep the
+                             terms of their original authors, which may not
+                             allow commercial use. Check them before any
+                             commercial use.

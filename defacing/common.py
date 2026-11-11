@@ -11,7 +11,8 @@ import numpy as np
 log = logging.getLogger("deface")
 
 FACE_VALUE_HU = -1000.0  # value of the "constant" fill (and nominal air)
-FILL_MODES = ("air", "soft-tissue", "constant")
+FILL_MODES = ("air", "soft-tissue", "constant", "template")
+FILL_SOFT_KEEP_OAR = "soft-tissue-keep-oar"   # command line shortcut: --fill soft-tissue --keep-oar
 
 # Recognized image file extensions, longest-first so ".nii.gz" wins over ".nii"
 KNOWN_SUFFIXES = (".nii.gz", ".nii", ".nrrd")
@@ -36,13 +37,33 @@ class Options:
     remove_roi: list[re.Pattern] = field(default_factory=list)
     pii_check: bool = True
     allow_empty_mask: bool = False
+    deface_targets: bool = False    # True: target volumes inside the region are de-faced as well
+    keep_roi: list[re.Pattern] = field(default_factory=list)     # also keep these ROIs' voxels
+    not_target: list[re.Pattern] = field(default_factory=list)   # never count these ROIs as targets
+    keep_oar: bool = False          # True: organs at risk are restored below the skin
+    keep_oar_ts: bool = False       # True: TotalSegmentator's organs at risk as well
+    keep_oar_depth_mm: float = 5.0  # only voxels at least this far below the skin
+    not_oar: list[re.Pattern] = field(default_factory=list)      # never restore these
+    template_model: str = ""        # --fill template: the template file ("" = default)
+    template_fallback: str = "none"     # --fallback: "none" (flag only), "soft-tissue" or "fail"
+    clip_body: bool = False
+    mask_rtdose: bool = False
+    anatomy_check: bool = False
+    face_check: bool = False
+    face_check_flag: str = "match"
+    face_check_fail: str = "never"
+    face_check_threshold: float = 0.30
 
     def settings(self) -> dict:
         """Settings that change the output; stored in the manifest of every patient."""
         return {"dilate_mm": self.dilate_mm, "dilate": self.dilate, "extend_anterior": self.extend_anterior,
                 "fill": self.fill, "keep_body": self.keep_body, "keep_skin": self.keep_skin,
                 "keep_rtplan": self.keep_rtplan, "keep_rtdose": self.keep_rtdose,
-                "remove_roi": [p.pattern for p in self.remove_roi]}
+                "remove_roi": [p.pattern for p in self.remove_roi], "deface_targets": self.deface_targets,
+                "keep_roi": [p.pattern for p in self.keep_roi], "not_target": [p.pattern for p in self.not_target],
+                "clip_body": self.clip_body, "mask_rtdose": self.mask_rtdose, "keep_oar": self.keep_oar,
+                "keep_oar_ts": self.keep_oar_ts, "keep_oar_depth_mm": self.keep_oar_depth_mm,
+                "not_oar": [p.pattern for p in self.not_oar], "template_fallback": self.template_fallback}
 
 
 def classify_suffix(path: Path) -> str:

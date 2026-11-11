@@ -66,9 +66,11 @@ def test_the_head_is_detected(result, tmp_path):
 
 def test_the_face_mask_holds_air(result):
     """Independent of the tool's own read-back check: in the de-faced volume (QC folder), the
-    raw face mask holds air (the default fill) everywhere."""
+    raw face mask holds air (the default fill), except for target voxels that were kept."""
     import nibabel as nib
     _, _, qc = result
+    manifest = json.loads((qc / "manifest.json").read_text(encoding="utf-8"))
+    kept_ml = sum(manifest.get("target_kept_ml") or [])
     for mask_path in sorted(qc.glob("face_mask*.nii.gz")):
         defaced_path = qc / mask_path.name.replace("face_mask", "CT_defaced")
         if not defaced_path.exists():                # NIfTI/NRRD input: no CT_defaced in the QC folder
@@ -76,4 +78,7 @@ def test_the_face_mask_holds_air(result):
         mask_img, defaced = nib.load(str(mask_path)), nib.load(str(defaced_path))
         assert mask_img.shape == defaced.shape
         hu = np.asanyarray(defaced.dataobj)[np.asanyarray(mask_img.dataobj) > 0]
-        assert (hu < -800).all(), f"{int((hu >= -800).sum())} face mask voxels hold more than -800 HU"
+        above = int((hu >= -800).sum())
+        voxel_ml = float(np.prod(mask_img.header.get_zooms()[:3])) / 1000.0
+        assert above * voxel_ml <= kept_ml + 0.01, (       # manifest values are rounded to 0.01 ml
+            f"{above} face mask voxels hold more than -800 HU, more than the {kept_ml} ml of kept targets explain")

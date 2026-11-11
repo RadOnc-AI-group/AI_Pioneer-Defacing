@@ -14,10 +14,11 @@ from collections import Counter
 from pathlib import Path
 
 from .common import Options, PatientError, classify_suffix, log, strip_known_suffix
-from .patient import (OVERLAP_COLS, SCRIPT_VERSION, TARGET_TYPES, PatientResult, deface_dicom_patient,
-                      deface_image_file)
+from .patient import OVERLAP_COLS, SCRIPT_VERSION, PatientResult, deface_dicom_patient, deface_image_file
 from .pii import PSEUDONYM_CHECKED
+from .reid import check_face_check
 from .segment import check_totalsegmentator
+from .timing import STAGES, summary_lines
 
 DEFAULT_CT_GLOBS = ["*CT*.nrrd", "*CT*.nii.gz", "*CT*.nii", "*ct*.nrrd", "*ct*.nii.gz", "*ct*.nii"]
 REPORTS_DIRNAME = "_reports"
@@ -45,7 +46,10 @@ def setup_logging(log_file: Path | None = None) -> None:
 class Reports:
     PATIENT_COLS = ["patient", "status", "seconds", "ct_series", "ct_files", "rt_files", "files_not_copied",
                     "rtdose_removed", "rtplan_removed", "rois_removed", "rois_unclear_kept", "face_mask_ml",
-                    "fill", "rtstruct_unresolved_refs", "identifying_tags_populated", "notes"]
+                    "fill", "fill_used", "template_quality", "rtstruct_unresolved_refs", "identifying_tags_populated", "rois_clipped", "rtdose_masked",
+                    "target_kept_ml", "target_exposed_cm2", "oar_kept_ml", "oar_exposed_cm2", "anatomy_check", "face_check", "face_check_score", "notes"]
+    TIMING_COLS = ["patient", "status", "device", "machine", "ct_series", "ct_files", "total_s",
+                   *(f"{stage}_s" for stage in STAGES), "other_s"]
     ID_COLS = ["patient", "class", "keyword", "pseudonym_matches_folder", "n_distinct_values",
                "values (max 5 shown)"]
 
@@ -54,6 +58,7 @@ class Reports:
         self.patients_csv = report_dir / f"patients_{stamp}.csv"
         self.ids_csv = report_dir / f"identifying_tags_{stamp}.csv" if pii_check else None
         self.overlap_csv = report_dir / f"roi_overlap_{stamp}.csv"
+        self.timing_csv = report_dir / f"timing_{stamp}.csv"
         self._files: dict[str, tuple] = {}
 
     def _writer(self, path: Path, header: list[str]):
@@ -68,13 +73,23 @@ class Reports:
     def write(self, r: PatientResult) -> None:
         folder = Path(r.rel).name
         flagged = r.ids.flagged(folder) if r.ids else r.pii
-        fills = ";".join(f.get("fill", "") for f in r.fill)
+        fills = ";".join("template" if "template_fallback" in f else f.get("fill", "") for f in r.fill)     # as requested
+        face_status, face_score = r.face_check_text()
         self._writer(self.patients_csv, self.PATIENT_COLS).writerow([
             r.rel, r.status, f"{r.seconds:.0f}", r.ct_series, r.ct_files, r.rt_files, r.not_copied,
             r.rtdose_removed, r.rtplan_removed, ";".join(r.rois_removed), ";".join(r.rois_unclear),
-            ";".join(f"{v:.1f}" for v in r.face_mask_ml), fills, r.unresolved_refs, ";".join(flagged),
+            ";".join(f"{v:.1f}" for v in r.face_mask_ml), fills, ";".join(f.get("fill_used", f.get("fill", "")) for f in r.fill),
+            ";".join(f.get("template_quality", "") for f in r.fill), r.unresolved_refs, ";".join(flagged),
+            ";".join(r.rois_clipped), r.rtdose_masked, ";".join(f"{v:.2f}" for v in r.target_kept_ml),
+            ";".join(f"{v:.1f}" for v in r.target_exposed_cm2), ";".join(f"{v:.2f}" for v in r.oar_kept_ml),
+            ";".join(f"{v:.1f}" for v in r.oar_exposed_cm2), r.anatomy_text(), face_status, face_score,
             " | ".join(([r.error] if r.error else []) + r.flags),
         ])
+        if r.timing:
+            other = max(0.0, r.seconds - sum(r.timing.values()))
+            self._writer(self.timing_csv, self.TIMING_COLS).writerow([
+                r.rel, r.status, r.device, r.machine, r.ct_series, r.ct_files, f"{r.seconds:.2f}",
+                *(f"{r.timing.get(stage, 0.0):.2f}" for stage in STAGES), f"{other:.2f}"])
         if r.ids and self.ids_csv:
             w = self._writer(self.ids_csv, self.ID_COLS)
             for kw in sorted(r.ids.values, key=lambda k: (r.ids.kinds[k] != "direct", k)):
@@ -101,7 +116,7 @@ class Reports:
 
 
 def _is_target(row: dict) -> bool:
-    return row["type"] in TARGET_TYPES or row["roi"].upper().startswith(TARGET_TYPES)
+    return row["is_target"] == "yes"
 
 
 def final_summary(results: list[PatientResult], reports: Reports, out_root: Path, qc_root: Path,
@@ -147,6 +162,27 @@ def final_summary(results: list[PatientResult], reports: Reports, out_root: Path
     n_plan = sum(r.rtplan_removed for r in processed)
     if n_plan:
         lines.append(f"!!! RTPLAN/RTRECORD: {n_plan} file(s) {verb} NOT copied (--keep-rtplan keeps them)")
+    masked = sum(r.rtdose_masked for r in processed)
+    if masked:
+        lines.append(f"RTDOSE: {masked} file(s) copied with the dose set to zero in the de-faced region.")
+    clipped = sum(len(r.rois_clipped) for r in processed)
+    if clipped:
+        lines.append(f"Body contours clipped to the remaining image: {clipped}.")
+    kept = [t for r in processed for t in r.targets if t["kept"]]
+    if kept:
+        lines.append(f"!!! TARGET VOXELS {verb} kept inside the de-faced region in "
+                     f"{sum(1 for r in processed if any(t['kept'] for t in r.targets))} patient(s) (--deface-targets "
+                     "replaces them); see target_exposed_cm2 in the report.")
+    synthetic = sum(1 for r in processed if any(f.get("fill_used") == "template" for f in r.fill))
+    fallback = sum(1 for r in processed if any("template_fallback" in f for f in r.fill))
+    weak = sum(1 for r in processed if any(f.get("fill_used") == "template" and f.get("template_quality") != "ok" for f in r.fill))
+    if synthetic or fallback:
+        lines.append(f"!!! EXPERIMENTAL SYNTHETIC FACE {verb} inserted in {synthetic} patient(s), {weak} of them with a fit below the "
+                     f"limits; {fallback} used soft-tissue instead (see template_quality and fill_used in the report).")
+    oars = sum(1 for r in processed if any(v > 0 for v in r.oar_kept_ml))
+    if oars:
+        lines.append(f"!!! ORGAN AT RISK VOXELS {verb} restored below the skin in {oars} patient(s) "
+                     "(--keep-oar); see oar_kept_ml in the report and check the QC pictures.")
     removed = Counter(name for r in processed for name in r.rois_removed)
     if removed:
         lines.append(f"!!! CONTOURS {verb} removed from the RTSTRUCTs of "
@@ -175,6 +211,13 @@ def final_summary(results: list[PatientResult], reports: Reports, out_root: Path
                  and float(row["min_distance_mm"]) < 10]
         lines.append(f"Targets (CTV/GTV/PTV): {len(close)} of {len(targets)} lie within 10 mm of the "
                      "de-faced region (see the roi_overlap report).")
+    faces = Counter(c["face_check"]["status"] for r in processed for c in r.checks if "face_check" in c)
+    if faces:
+        lines.append("Face check (CT series): " + ", ".join(f"{n} {status}" for status, n in faces.most_common()))
+    timed = [(r.device, r.seconds, r.timing) for r in processed if r.timing]
+    if timed:
+        lines += summary_lines(timed)
+        lines.append(f"Machine: {next(r.machine for r in processed if r.timing)}")
     if lines:
         log.info(bar)
         for ln in lines:
@@ -227,7 +270,7 @@ def notify(msg: str) -> None:
 
 def _process(kind: str, path: Path, rel: str, out_dir: Path, qc_dir: Path, opts: Options,
              dry_run: bool) -> PatientResult:
-    t0 = time.time()
+    t0 = time.perf_counter()
     fn = deface_dicom_patient if kind == "dicom" else deface_image_file
     try:
         res = fn(path, rel, out_dir, qc_dir, opts, dry_run=dry_run)
@@ -238,7 +281,7 @@ def _process(kind: str, path: Path, rel: str, out_dir: Path, qc_dir: Path, opts:
     except Exception as e:                                   # unexpected: log it and keep going
         log.exception("    unexpected error")
         res = PatientResult(rel=rel, error=f"{type(e).__name__}: {e}")
-    res.seconds = time.time() - t0
+    res.seconds = time.perf_counter() - t0
     if res.status == "failed":
         log.error(f"    FAILED: {res.error}")
     return res
@@ -253,7 +296,7 @@ def run_single(input_path: Path, out_dir: Path, qc_dir: Path, opts: Options, dry
         if out_dir.exists() and any(out_dir.iterdir()):
             log.error(f"Output folder exists and is not empty: {out_dir}. Delete it or choose another -o.")
             return 2
-        problem = check_totalsegmentator()
+        problem = check_totalsegmentator() or (check_face_check() if opts.face_check else None)
         if problem:
             log.error(problem)
             return 2
@@ -328,7 +371,7 @@ def run_batch(in_root: Path, out_root: Path, qc_root: Path, opts: Options, depth
         log.error("The QC folder must not lie inside the output folder (it holds the face masks).")
         return 2
     if not dry_run:
-        problem = check_totalsegmentator()
+        problem = check_totalsegmentator() or (check_face_check() if opts.face_check else None)
         if problem:
             log.error(problem)
             return 2
@@ -377,7 +420,8 @@ def run_batch(in_root: Path, out_root: Path, qc_root: Path, opts: Options, depth
                     log.info("    already done, skipping (delete its output folder to redo it)")
                     res = PatientResult(rel=rel, status="already done")
                     done_with = json.loads(manifest.read_text(encoding="utf-8"))
-                    diff = [f"{k}={done_with.get(k)}" for k, v in opts.settings().items() if done_with.get(k) != v]
+                    diff = [f"{k}={done_with[k]}" for k, v in opts.settings().items()
+                            if k in done_with and done_with[k] != v]    # older manifests lack the newer settings
                     if done_with.get("script_version") != SCRIPT_VERSION:
                         diff.insert(0, f"tool version {done_with.get('script_version')} (now {SCRIPT_VERSION})")
                     if diff:

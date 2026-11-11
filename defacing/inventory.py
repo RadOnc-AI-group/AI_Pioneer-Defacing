@@ -114,12 +114,12 @@ def inventory(patient_dir: Path, opts: Options) -> Inventory:
         elif modality == "RTSTRUCT":
             inv.rt.append(f)
         elif modality == "RTDOSE":
-            if opts.keep_rtdose:
+            if opts.keep_rtdose or opts.mask_rtdose:
                 inv.rt.append(f)
             else:
                 inv.rtdose_removed += 1
-                inv.not_copied.append((rel, "RTDOSE removed (the dose is zero outside the body, so "
-                                            "it outlines the face; --keep-rtdose keeps it)"))
+                inv.not_copied.append((rel, "RTDOSE removed (the dose is zero outside the body, so it outlines the "
+                                            "face; --mask-rtdose copies it with the face region set to zero)"))
         elif modality in PLAN_MODALITIES:
             if opts.keep_rtplan:
                 inv.rt.append(f)

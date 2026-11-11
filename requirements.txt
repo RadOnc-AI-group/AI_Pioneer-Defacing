@@ -4,5 +4,6 @@ TotalSegmentator==2.14.0
 nibabel==5.4.2
 SimpleITK==2.5.5
 scipy==1.15.3
+scikit-image==0.25.2
 pydicom==3.0.2
 python-gdcm==3.2.6

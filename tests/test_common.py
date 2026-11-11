@@ -42,5 +42,6 @@ def test_is_hidden(rel, hidden):
 def test_settings_cover_every_option_that_changes_the_output():
     s = Options().settings()
     assert set(s) == {"dilate_mm", "dilate", "extend_anterior", "fill", "keep_body", "keep_skin", "keep_rtplan",
-                      "keep_rtdose", "remove_roi"}
+                      "keep_rtdose", "remove_roi", "deface_targets", "keep_roi", "not_target", "clip_body",
+                      "mask_rtdose", "keep_oar", "keep_oar_ts", "keep_oar_depth_mm", "not_oar", "template_fallback"}
     assert s["fill"] == "air" and s["extend_anterior"] is True and s["dilate_mm"] == 3.0 and s["dilate"] == 2

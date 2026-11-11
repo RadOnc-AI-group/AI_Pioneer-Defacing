@@ -18,11 +18,16 @@ soft-tissue
     Needs the region to reach the anterior image edge (otherwise concave parts of the
     face would leave a face-shaped tissue/air boundary inside the hull).
 
+template (experimental)
+    Like soft-tissue, but the new front of the head is a synthetic mean face (the surface in
+    `template`, blended into the convex-hull front over BLEND_MM from the outline of the
+    region). Behind it there is only tissue and the skin layer, no internal anatomy.
+
 constant
     -1000 HU everywhere in the region. Selecting the voxels that are exactly -1000 HU
     then shows the outline of the face mask: use only if the data stays internal.
 
-For air and soft-tissue, everything is computed from voxels OUTSIDE the de-faced region
+For air, soft-tissue and template, everything is computed from voxels OUTSIDE the de-faced region
 plus a random seed, so the fill adds no information about the face. Voxels outside the
 reconstructed field of view (padding below -1100 HU, e.g. -3024 HU) are left unchanged;
 they never hold tissue.
@@ -42,6 +47,7 @@ PADDING_BELOW_HU = -1100.0  # values below: outside the reconstructed field of v
 STATS_MM = 50.0             # air/noise statistics: slices within this distance of the region
 NEAR_MM = 20.0              # soft-tissue value: tissue within this distance of the region
 SKIN_MM = 2.0
+BLEND_MM = 10.0             # template: width of the ramp from the convex-hull front to the template front
 PATCH = 16                  # noise patches (pixels)
 MAX_PATCHES = 400
 MAX_AIR_SAMPLES = 500_000
@@ -53,23 +59,34 @@ class NoiseModel:
     kernel: np.ndarray    # 2D in-plane filter with unit energy: white noise * kernel has unit std
 
 
+@dataclass
+class TemplateFront:
+    """A new front of the head for the template fill: position (mm along the anterior direction,
+    0 = voxel centre of the most posterior slice) per (slice, left-right column), slices
+    numbered upwards, left-right in the order of the image. NaN = no template in that column."""
+    front: np.ndarray
+
+
 def fill_seed(text: str) -> int:
     """Reproducible seed derived from a (random, non-identifying) UID."""
     import hashlib
     return int(hashlib.sha256(text.encode()).hexdigest()[:15], 16)
 
 
-def apply_fill(hu: np.ndarray, region: np.ndarray, axes: Axes, mode: str, seed: int) -> tuple[np.ndarray, dict]:
+def apply_fill(hu: np.ndarray, region: np.ndarray, axes: Axes, mode: str, seed: int,
+               template: TemplateFront | None = None) -> tuple[np.ndarray, dict]:
     """Return a copy of hu (in HU) with the de-faced region filled, and a description of the fill."""
     if mode == "constant":
         out = hu.astype(np.float32, copy=True)
         out[region] = FACE_VALUE_HU
         return out, {"fill": "constant", "value_hu": FACE_VALUE_HU}
-    if mode not in ("air", "soft-tissue"):
+    if mode not in ("air", "soft-tissue", "template"):
         raise ValueError(f"unknown fill mode: {mode}")
+    if mode == "template" and template is None:
+        raise ValueError("the template fill needs a template front")
     if not region.any():
         return hu.astype(np.float32, copy=True), {"fill": mode, "seed": seed, "voxels": 0}
-    return _sampled_fill(hu, region, axes, mode, seed)
+    return _sampled_fill(hu, region, axes, mode, seed, template)
 
 
 # ---------------------------------------------------------------------------
@@ -156,7 +173,54 @@ def _hull_membership(body2d: np.ndarray, pixels: np.ndarray) -> np.ndarray:
     return (pixels @ eq[:, :2].T + eq[:, 2] <= 0.5).all(axis=1)
 
 
-def _sampled_fill(hu: np.ndarray, region: np.ndarray, axes: Axes, mode: str, seed: int) -> tuple[np.ndarray, dict]:
+def blend_weight(region2d: np.ndarray, spacing: tuple[float, float]) -> np.ndarray:
+    """Weight of the template front per column of the region: 0 at its outline, 1 from BLEND_MM inwards."""
+    from scipy.ndimage import distance_transform_edt
+    return 0.5 * (1.0 - np.cos(np.pi * np.clip(distance_transform_edt(region2d, sampling=spacing) / BLEND_MM, 0.0, 1.0)))
+
+
+def _template_support(template: TemplateFront, target: np.ndarray, hull: np.ndarray, body: np.ndarray, rs: np.ndarray,
+                      spacing: tuple, axes: Axes, z0: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """(tissue, skin, share of tissue per voxel) behind the blended front. All arrays have the axes of `target`."""
+    from scipy.ndimage import distance_transform_edt
+    others = [i for i in range(3) if i != axes.si_axis]
+    ap = 1 + others.index(axes.anterior[0])
+    s_ap, s_lr = spacing[ap], spacing[3 - ap]
+    increasing = axes.anterior[1]
+
+    def view(v: np.ndarray) -> np.ndarray:                 # axes (slice, anterior, left-right), index increases anteriorly
+        v = np.moveaxis(v, ap, 1)
+        return v if increasing else v[:, ::-1]
+
+    def unview(v: np.ndarray) -> np.ndarray:
+        return np.moveaxis(v if increasing else v[:, ::-1], 1, ap)
+
+    hull_v, rs_v = view(hull), view(rs)
+    n = hull_v.shape[1]
+    has_hull = hull_v.any(axis=1)
+    hull_front = (n - np.argmax(hull_v[:, ::-1, :], axis=1) - 0.5) * s_ap
+    front = (template.front if axes.superior else template.front[::-1])[z0:z0 + len(rs_v)]
+    if front.shape != has_hull.shape:
+        raise ValueError(f"the template front has shape {front.shape}, expected {has_hull.shape}")
+    weight = blend_weight(rs_v.any(axis=1), (spacing[0], s_lr))
+    blended = np.where(np.isfinite(front), (1.0 - weight) * hull_front + weight * np.nan_to_num(front), hull_front)
+    blended = np.where(has_hull, blended, -np.inf)
+    share = unview(np.clip((blended[:, None, :] - np.arange(n, dtype=np.float64)[None, :, None] * s_ap) / s_ap + 0.5, 0.0, 1.0))
+    tissue = target & (share > 0.0)
+
+    skin = np.zeros_like(tissue)
+    if tissue.any():
+        pad = [int(np.ceil(SKIN_MM / s)) + 2 for s in spacing]
+        where = np.nonzero(tissue)
+        crop = tuple(slice(max(0, int(c.min()) - p), min(m, int(c.max()) + p + 1))
+                     for c, p, m in zip(where, pad, tissue.shape))
+        solid = (tissue | body)[crop]                      # what lies behind the support is not its surface
+        skin[crop] = tissue[crop] & (distance_transform_edt(solid, sampling=spacing) <= SKIN_MM)
+    return tissue, skin, share.astype(np.float32)
+
+
+def _sampled_fill(hu: np.ndarray, region: np.ndarray, axes: Axes, mode: str, seed: int,
+                  template: TemplateFront | None = None) -> tuple[np.ndarray, dict]:
     from scipy.ndimage import binary_dilation, binary_fill_holes, distance_transform_edt, label
 
     rng = np.random.default_rng(seed)
@@ -233,10 +297,14 @@ def _sampled_fill(hu: np.ndarray, region: np.ndarray, axes: Axes, mode: str, see
         pix = np.stack([aa.ravel(), bb.ravel()], axis=1)
         inside = _hull_membership(body[z], pix)
         hull[z, pix[inside, 0], pix[inside, 1]] = True
-    tissue = target & hull
-    skin = np.zeros_like(tissue)                           # tissue within SKIN_MM of the hull surface
-    for z in np.flatnonzero(tissue.any(axis=(1, 2))):
-        skin[z] = tissue[z] & (distance_transform_edt(hull[z], sampling=spacing[1:]) <= SKIN_MM)
+    share = None
+    if mode == "template":
+        tissue, skin, share = _template_support(template, target, hull, body, rs, spacing, axes, z0)
+    else:
+        tissue = target & hull
+        skin = np.zeros_like(tissue)                       # tissue within SKIN_MM of the hull surface
+        for z in np.flatnonzero(tissue.any(axis=(1, 2))):
+            skin[z] = tissue[z] & (distance_transform_edt(hull[z], sampling=spacing[1:]) <= SKIN_MM)
 
     # tissue values: soft tissue near the region (distances in a crop around it)
     _, ai, bi = np.nonzero(rs)
@@ -258,6 +326,9 @@ def _sampled_fill(hu: np.ndarray, region: np.ndarray, axes: Axes, mode: str, see
     vals[a] = air_fill[a]
     vals[t] = tissue_hu + t_noise[t]
     vals[s] = skin_hu + t_noise[s]
+    if share is not None:                                  # partial volume at the surface of the template
+        f = share[box][t]
+        vals[t] = f * vals[t] + (1.0 - f) * air_fill[t]
     info.update(tissue_hu=round(tissue_hu, 1), skin_hu=round(skin_hu, 1),
                 tissue_noise_std=round(tissue_noise.std, 1),
                 voxels_tissue=int(t.sum()), voxels_air=int(a.sum()))
