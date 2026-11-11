@@ -437,6 +437,20 @@ On GitHub, the workflow `totalsegmentator` runs it on the CPU (weekly, by hand, 
 
 ---
 
+## License
+
+The code is licensed under the [Apache License 2.0](LICENSE), and so are the documentation and tests. You may use, modify and redistribute it, also commercially. You must keep the copyright notice and the [NOTICE](NOTICE) file, and state your changes. The Apache licence does not give you the right to use the project's name.
+
+**Exceptions and third-party terms.** Some parts are not covered by the Apache licence, or have their own terms:
+
+- `defacing/data/flame_template.npz` is derived from FLAME 2023 Open. It is licensed under CC-BY-4.0, with the additional terms of the FLAME model licence ([details](defacing/data/flame_template.npz.NOTICE.txt)).
+- **Model weights are not part of this repository.** TotalSegmentator's `face` task, which this tool needs, is free for non-commercial use only. **Commercial use of the tool therefore needs a TotalSegmentator commercial licence**, unless you use another face model. The models of the face check keep their own terms.
+- The Python dependencies are all under permissive licences (Apache-2.0, MIT or BSD). They are listed in [NOTICE](NOTICE).
+
+**Contributing.** Please approach us if you like to contribute or directly create an issue.
+
+---
+
 ## Troubleshooting
 
 **"License number has not been set"**  
